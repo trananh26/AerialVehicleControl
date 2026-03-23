@@ -92,7 +92,7 @@ ros2 launch ardupilot_sitl sitl_mavros_udp.launch.py
 ```bash
 colcon build --packages-select drone_control
 source install/setup.bash
-ros2 run drone_control takeoff_land_mission
+ros2 run drone_control circle_mission
 ```
 
 ## Validation Checklist
@@ -123,14 +123,10 @@ ros2 run drone_control takeoff_land_mission
    ros2 service list | grep mavros
    ```
 
-4. **Run takeoff/land mission:**
+4. **Run circle mission:**
    ```bash
-  ros2 run drone_control takeoff_land_mission
+   ros2 run drone_control circle_mission
    ```
-
-## Current Runtime Note
-
-If `ros2 run drone_control takeoff_land_mission` prints `Waiting for set_mode service...`, the Python node and entry point are working. This indicates MAVROS service endpoints are not available yet; launch SITL/real-board MAVROS first and verify `/mavros/state`.
 
 ## Troubleshooting
 

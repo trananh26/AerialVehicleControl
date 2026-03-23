@@ -1,0 +1,32 @@
+# ROS2 build artifacts
+build/
+install/
+log/
+logs/
+
+# Telemetry/log files
+*.tlog
+*.tlog.raw
+*.bin
+mav.parm
+terrain/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Third-party packages (managed via workspace.repos + vcs import)
+src/ardupilot/
+src/ardupilot_gazebo/
+src/ardupilot_gz/
+src/ardupilot_sitl_models/
+src/mavros/
+src/micro_ros_agent/
+src/ros_gz/
+src/sdformat_urdf/
+
+.vscode
+src/.vscode
+.vscode/browse.vc.db-shm
+.vscode/browse.vc.db-wal

@@ -12,7 +12,7 @@ You now have two separate MAVROS configurations:
 | **Autopilot** | Simulated (JSON), running locally | Physical hardware (Pixhawk, F450, etc.) |
 | **Connection** | UDP localhost | USB/Serial connection |
 | **URL Format** | `udp://127.0.0.1:14550@127.0.0.1:14551` | `/dev/ttyACM0:115200` |
-| **Launch File** | `iris_runway.launch.py` | `apm.launch.py` |
+| **Launch File** | `sitl_mavros_udp.launch.py` | `mavros_real_board.launch.py` |
 | **Extra Components** | Includes SITL + MAVProxy | Just MAVROS |
 | **Port Setup** | No setup needed | USB cable required |
 
@@ -25,7 +25,7 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 
 # Start SITL with MAVROS
-ros2 launch ardupilot_gz_bringup iris_runway.launch.py
+ros2 launch ardupilot_sitl sitl_mavros_udp.launch.py
 ```
 
 ### Verify Connection
@@ -74,32 +74,29 @@ cd /home/an/ros2_project/ardupilot/mavros_sw_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 
-ros2 launch mavros apm.launch.py
-
-# Recommended for your board
-ros2 launch mavros apm.launch.py fcu_url:=/dev/ttyACM0:57600
+ros2 launch ardupilot_sitl mavros_real_board.launch.py
 ```
 
 ### Launch Command - Custom Serial Port
 
 **With custom port and baudrate:**
 ```bash
-ros2 launch mavros apm.launch.py \
+ros2 launch ardupilot_sitl mavros_real_board.launch.py \
   fcu_url:=/dev/ttyACM0:115200
 ```
 
 **Other baudrates:**
 ```bash
 # 57600 baud
-ros2 launch mavros apm.launch.py \
+ros2 launch ardupilot_sitl mavros_real_board.launch.py \
   fcu_url:=/dev/ttyUSB0:57600
 
 # 921600 baud (faster)
-ros2 launch mavros apm.launch.py \
+ros2 launch ardupilot_sitl mavros_real_board.launch.py \
   fcu_url:=/dev/ttyUSB0:921600
 
 # FTDI USB adapter
-ros2 launch mavros apm.launch.py \
+ros2 launch ardupilot_sitl mavros_real_board.launch.py \
   fcu_url:=/dev/ttyUSB0:115200
 ```
 
@@ -107,13 +104,13 @@ ros2 launch mavros apm.launch.py \
 
 **TCP connection (Ethernet):**
 ```bash
-ros2 launch mavros apm.launch.py \
+ros2 launch ardupilot_sitl mavros_real_board.launch.py \
   fcu_url:=tcp://192.168.1.100:5760
 ```
 
 **UDP connection (Telemetry radio):**
 ```bash
-ros2 launch mavros apm.launch.py \
+ros2 launch ardupilot_sitl mavros_real_board.launch.py \
   fcu_url:=udp://0.0.0.0:14550@192.168.1.100:14550
 ```
 
@@ -148,7 +145,7 @@ sudo usermod -a -G dialout $USER
 newgrp dialout
 
 # Or use sudo
-sudo ros2 launch mavros apm.launch.py
+sudo ros2 launch ardupilot_sitl mavros_real_board.launch.py
 ```
 
 ### "Connection timeout" Error
@@ -164,7 +161,7 @@ lsusb  # List USB devices
 ```bash
 # Common issue: wrong baudrate
 # Try 57600 if 115200 doesn't work
-ros2 launch mavros apm.launch.py \
+ros2 launch ardupilot_sitl mavros_real_board.launch.py \
   fcu_url:=/dev/ttyACM0:57600
 ```
 
@@ -196,14 +193,14 @@ minicom -D /dev/ttyACM0
 
 ## Running Your Application with Real Board
 
-### Takeoff/Land Mission on Real Board
+### Circle Mission on Real Board
 ```bash
 # Terminal 1: Connect MAVROS to real board
-ros2 launch mavros apm.launch.py
+ros2 launch ardupilot_sitl mavros_real_board.launch.py
 
-# Terminal 2: Run takeoff/land mission
+# Terminal 2: Run circle mission
 source install/setup.bash
-ros2 run drone_control takeoff_land_mission
+ros2 run drone_control circle_mission
 ```
 
 ### Monitor in Real Time (Terminal 3)
@@ -226,11 +223,11 @@ ros2 echo /mavros/sys_status
 ┌─────────────────┬────────────────────────────┬─────────────────────────────┐
 │ Use Case        │ SITL Command               │ Real Board Command          │
 ├─────────────────┼────────────────────────────┼─────────────────────────────┤
-│ SITL (default)  │ iris_runway.launch.py      │ -                           │
-│ USB Pixhawk     │ -                          │ apm.launch.py               │
-│ Custom port     │ -                          │ apm.launch.py               │
+│ SITL (default)  │ sitl_mavros_udp.launch.py  │ -                           │
+│ USB Pixhawk     │ -                          │ mavros_real_board.launch.py │
+│ Custom port     │ -                          │ mavros_real_board.launch.py │
 │                 │                            │ fcu_url:=/dev/ttyUSB0:57600 │
-│ Telemetry radio │ -                          │ apm.launch.py               │
+│ Telemetry radio │ -                          │ mavros_real_board.launch.py │
 │                 │                            │ fcu_url:=udp://IP:PORT      │
 └─────────────────┴────────────────────────────┴─────────────────────────────┘
 ```
@@ -257,8 +254,8 @@ ros2 echo /mavros/sys_status
 /mavros/imu/mag                      # Magnetometer
 /mavros/altitude                     # Barometer altitude
 
-# Control (for takeoff_land_mission)
-/mavros/cmd/command                  # MAV_CMD_NAV_TAKEOFF backend
+# Control (for circle_mission)
+/mavros/setpoint_velocity/cmd_vel    # Velocity commands (publish)
 /mavros/local_position/pose          # Position feedback (subscribe)
 ```
 
@@ -282,35 +279,25 @@ ros2 service list | grep mavros | head -20
 ### Workflow 1: Test with SITL First, Then Real Board
 ```bash
 # Step 1: Test everything with SITL
-ros2 launch ardupilot_gz_bringup iris_runway.launch.py
+ros2 launch ardupilot_sitl sitl_mavros_udp.launch.py
 # (in another terminal)
-ros2 run drone_control takeoff_land_mission
+ros2 run drone_control circle_mission
 
 # Step 2: When ready, switch to real board
-ros2 launch mavros apm.launch.py
-# (same takeoff_land_mission command works without changes)
-ros2 run drone_control takeoff_land_mission
-```
-
-### Current Situation Note
-If the node logs `Waiting for set_mode service...`, the mission node is running correctly but MAVROS services are not available yet. Start or fix MAVROS connection first, then rerun:
-
-```bash
-cd /home/an/ros2_project/ardupilot/mavros_sw_ws
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 run drone_control takeoff_land_mission
+ros2 launch ardupilot_sitl mavros_real_board.launch.py
+# (same circle_mission command works without changes!)
+ros2 run drone_control circle_mission
 ```
 
 ### Workflow 2: Multiple Boards
 ```bash
 # Terminal 1: Board 1
-ros2 launch mavros apm.launch.py \
+ros2 launch ardupilot_sitl mavros_real_board.launch.py \
   --namespace board1 \
   fcu_url:=/dev/ttyACM0:115200
 
 # Terminal 2: Board 2
-ros2 launch mavros apm.launch.py \
+ros2 launch ardupilot_sitl mavros_real_board.launch.py \
   --namespace board2 \
   fcu_url:=/dev/ttyUSB0:115200
 
@@ -344,10 +331,10 @@ ros2 launch mavros apm.launch.py \
 
 ```
 ✅ New Launch Files:
-  - Use MAVROS built-in launch: `mavros/launch/apm.launch.py`
+   - ardupilot/Tools/ros2/ardupilot_sitl/launch/mavros_real_board.launch.py
 
 ✅ Existing SITL Launch (unchanged):
-  - ardupilot_gz_bringup/launch/iris_runway.launch.py
+   - ardupilot/Tools/ros2/ardupilot_sitl/launch/sitl_mavros_udp.launch.py
 ```
 
-Both configurations use the same MAVROS topics and your `takeoff_land_mission` node - just different connection methods.
+Both configurations use the same MAVROS topics and your circle_mission code - just different connection methods!
