@@ -1,0 +1,23 @@
+{
+    "ROS2.distro": "humble",
+    "python.autoComplete.extraPaths": [
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/mavros_msgs/local/lib/python3.10/dist-packages",
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/mavros/local/lib/python3.10/dist-packages",
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/ros_gz_interfaces/local/lib/python3.10/dist-packages",
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/ardupilot_msgs/local/lib/python3.10/dist-packages",
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/ardupilot_sitl/local/lib/python3.10/dist-packages",
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/drone_control/lib/python3.10/site-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/mavros_msgs/local/lib/python3.10/dist-packages",
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/mavros/local/lib/python3.10/dist-packages",
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/ros_gz_interfaces/local/lib/python3.10/dist-packages",
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/ardupilot_msgs/local/lib/python3.10/dist-packages",
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/ardupilot_sitl/local/lib/python3.10/dist-packages",
+        "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/drone_control/lib/python3.10/site-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+    ]
+}
