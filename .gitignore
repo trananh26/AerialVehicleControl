@@ -27,6 +27,5 @@ src/ros_gz/
 src/sdformat_urdf/
 
 .vscode
-src/.vscode
-.vscode/browse.vc.db-shm
-.vscode/browse.vc.db-wal
+src/.vscode/
+.vscode/

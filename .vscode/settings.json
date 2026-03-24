@@ -17,5 +17,6 @@
         "/home/an/ros2_project/ardupilot/mavros_sw_ws/install/ardupilot_msgs/local/lib/python3.10/dist-packages",
         "/opt/ros/humble/lib/python3.10/site-packages",
         "/opt/ros/humble/local/lib/python3.10/dist-packages"
-    ]
+    ],
+    "github.copilot.chat.codeGeneration.useInstructionFiles": true
 }
