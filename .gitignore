@@ -17,14 +17,7 @@ __pycache__/
 *.pyo
 
 # Third-party packages (managed via workspace.repos + vcs import)
-src/ardupilot/
-src/ardupilot_gazebo/
-src/ardupilot_gz/
-src/ardupilot_sitl_models/
 src/mavros/
-src/micro_ros_agent/
-src/ros_gz/
-src/sdformat_urdf/
 
 .vscode
 src/.vscode/
