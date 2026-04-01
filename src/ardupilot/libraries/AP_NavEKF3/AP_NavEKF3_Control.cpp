@@ -478,9 +478,11 @@ void NavEKF3_core::setAidingMode()
                     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "EKF3 IMU%u initial vel NED = %3.1f,%3.1f,%3.1f (m/s)",(unsigned)imu_index,(double)extNavVelDelayed.vel.x,(double)extNavVelDelayed.vel.y,(double)extNavVelDelayed.vel.z);
                 }
                 // handle height reset as special case
-                hgtMea = -extNavDataDelayed.pos.z;
-                posDownObsNoise = sq(constrain_ftype(extNavDataDelayed.posErr, 0.1f, 10.0f));
-                ResetHeight();
+                if (frontend->sources.getPosZSource(core_index) == AP_NavEKF_Source::SourceZ::EXTNAV) {
+                    hgtMea = -extNavDataDelayed.pos.z;
+                    posDownObsNoise = sq(constrain_ftype(extNavDataDelayed.posErr, 0.1f, 10.0f));
+                    ResetHeight();
+                }
 #endif // EK3_FEATURE_EXTERNAL_NAV
             }
 
@@ -681,6 +683,13 @@ bool NavEKF3_core::assume_zero_sideslip(void) const
 // returns false if the origin is already set
 bool NavEKF3_core::setOriginLLH(const Location &loc)
 {
+    // reject external origin setting until the filter has finished
+    // bootstrap initialisation.  InitialiseVariables() resets
+    // validOrigin, so an origin set before that point is lost.
+    // Callers (e.g. AHRS use_recorded_origin_maybe) will retry.
+    if (!statesInitialised) {
+        return false;
+    }
     return setOrigin(loc);
 }
 

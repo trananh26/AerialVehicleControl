@@ -29,7 +29,8 @@ class CircleMission(Node):
     FLY_TO_CENTER = 10
     SEND_LAND = 11
     WAIT_LAND = 12
-    DONE = 13
+    WAIT_DISARM = 13
+    DONE = 14
 
     def __init__(self):
 
@@ -108,7 +109,7 @@ class CircleMission(Node):
         self.current_x = msg.pose.position.x
         self.current_y = msg.pose.position.y
         self.current_z = msg.pose.position.z
-        if self.mission_state >= self.CLIMBING and self.mission_state <= self.DONE:
+        if self.mission_state >= self.CLIMBING and self.mission_state <= self.WAIT_DISARM:
             pose = PoseStamped()
             pose.header = msg.header
             pose.header.frame_id = "map"
@@ -154,6 +155,9 @@ class CircleMission(Node):
         self.get_logger().info(f"Actual path saved: {actual_file} ({len(self.actual_path.poses)} points)")
 
 
+
+
+
     def add_planned(self, x, y, z):
         pose = PoseStamped()
         pose.header.stamp = self.get_clock().now().to_msg()
@@ -161,6 +165,7 @@ class CircleMission(Node):
         pose.pose.position.x = x
         pose.pose.position.y = y
         pose.pose.position.z = z
+        pose.pose.orientation.w = 1.0
         self.planned_path.poses.append(pose)
         self.planned_path.header.stamp = pose.header.stamp
         self.planned_path_pub.publish(self.planned_path)
@@ -371,12 +376,19 @@ class CircleMission(Node):
                 return
             resp = self.pending_future.result()
             if resp and resp.mode_sent:
-                self.get_logger().info("LAND mode accepted, mission complete")
-                self.save_paths_to_csv()
-                self.mission_state = self.DONE
+                self.get_logger().info("LAND mode accepted, waiting for drone to land...")
+                self.mission_state = self.WAIT_DISARM
             else:
                 self.get_logger().warn("LAND mode rejected, retrying...")
                 self.mission_state = self.SEND_LAND
+            return
+
+        # --- WAIT_DISARM: wait until drone actually lands and disarms ---
+        if self.mission_state == self.WAIT_DISARM:
+            if self.current_state and not self.current_state.armed:
+                self.get_logger().info("Drone disarmed, landing complete. Saving paths...")
+                self.save_paths_to_csv()
+                self.mission_state = self.DONE
             return
 
 

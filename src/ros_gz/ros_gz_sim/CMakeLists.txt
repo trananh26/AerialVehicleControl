@@ -158,4 +158,34 @@ ament_export_targets(${PROJECT_NAME})
 
 ament_export_dependencies(rclcpp)
 
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  ament_lint_auto_find_test_dependencies()
+
+  # GTest
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_find_gtest()
+
+  ament_add_gtest_executable(test_stopwatch
+    test/test_stopwatch.cpp
+  )
+
+  ament_target_dependencies(test_stopwatch rclcpp)
+
+  target_include_directories(test_stopwatch PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+
+  target_link_libraries(test_stopwatch
+    ${PROJECT_NAME}
+  )
+
+  install(
+    TARGETS test_stopwatch
+    DESTINATION lib/${PROJECT_NAME}
+  )
+  ament_add_gtest_test(test_stopwatch)
+endif()
+
 ament_package()

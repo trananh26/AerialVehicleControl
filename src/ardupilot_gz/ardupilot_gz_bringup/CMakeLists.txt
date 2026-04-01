@@ -29,21 +29,6 @@ install(
   DESTINATION share/${PROJECT_NAME}/rviz
 )
 
-# Install project urdf files.
-install(
-  DIRECTORY
-    urdf/
-  DESTINATION share/${PROJECT_NAME}/urdf
-)
-
-# Install scripts.
-install(
-  DIRECTORY
-    scripts/
-  DESTINATION share/${PROJECT_NAME}/scripts
-  USE_SOURCE_PERMISSIONS
-)
-
 # --------------------------------------------------------------------------- #
 #  Build tests.
 

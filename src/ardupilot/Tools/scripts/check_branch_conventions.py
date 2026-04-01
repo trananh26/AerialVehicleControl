@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-from __future__ import annotations
-
 '''
 Check PR branch commit conventions and markdown linting.
 
@@ -15,6 +13,8 @@ Validates:
 AP_FLAKE8_CLEAN
 '''
 
+from __future__ import annotations
+
 import argparse
 import os
 import re
@@ -25,6 +25,13 @@ import build_script_base
 
 DOCS_URL = "https://ardupilot.org/dev/docs/submitting-patches-back-to-master.html"
 MAX_SUBJECT_LEN = 160
+BLACKLISTED_PREFIXES = {
+    "DEBUG",
+    "DRAFT",
+    "TEMP",
+    "TMP",
+    "WIP",
+}
 # spaces and quotes allowed to support Revert commits e.g. 'Revert "AP_Periph: ...'
 PREFIX_RE = re.compile(r'^[-A-Za-z0-9._/" ]+$')
 
@@ -97,6 +104,10 @@ class CheckBranchConventions(build_script_base.BuildScriptBase):
                 ok = False
                 continue
             prefix = subject.split(":")[0]
+            if prefix.strip().upper() in BLACKLISTED_PREFIXES:
+                print(f"{FAIL} Bad subsystem prefix '{prefix}': {line}")
+                print(f"       See: {DOCS_URL}")
+                ok = False
             if not PREFIX_RE.match(prefix):
                 print(f"{FAIL} Malformed subsystem prefix '{prefix}': {line}")
                 print("       Prefix must contain only letters, digits, '.', '_', '/', '-', spaces, quotes.")
@@ -117,6 +128,23 @@ class CheckBranchConventions(build_script_base.BuildScriptBase):
         if ok:
             print(f"{PASS} All commit subject lines within {MAX_SUBJECT_LEN} characters.")
         return ok
+
+    def check_author_emails(self) -> bool:
+        emails = self.run_git(
+            ["log", f"{self.base_branch}..HEAD", "--format=%ae"],
+            show_output=False,
+        ).strip()
+        bad = []
+        for email in emails.splitlines():
+            if "example.com" in email:
+                bad.append(email)
+        if bad:
+            print(f"{FAIL} Author email(s) with example.com are not allowed:")
+            for email in bad:
+                print(f"         {email}")
+            return False
+        print(f"{PASS} No unacceptable author emails.")
+        return True
 
     def check_markdown(self) -> bool:
         changed_md = self.run_git(
@@ -159,6 +187,7 @@ class CheckBranchConventions(build_script_base.BuildScriptBase):
             self.check_fixup_commits(commits),
             self.check_commit_messages(commits),
             self.check_commit_lengths(commits),
+            self.check_author_emails(),
             self.check_markdown(),
         ]
 

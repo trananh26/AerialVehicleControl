@@ -43,7 +43,6 @@ from launch.substitutions import LaunchConfiguration
 from launch.substitutions import PathJoinSubstitution
 
 from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -58,7 +57,7 @@ def generate_launch_description():
             [
                 PathJoinSubstitution(
                     [
-                        FindPackageShare("ardupilot_gz_bringup"),
+                        pkg_project_bringup,
                         "launch",
                         "robots",
                         "iris.launch.py",
@@ -93,8 +92,13 @@ def generate_launch_description():
     rviz = Node(
         package="rviz2",
         executable="rviz2",
+        namespace="iris",
         arguments=["-d", f'{Path(pkg_project_bringup) / "rviz" / "iris.rviz"}'],
         condition=IfCondition(LaunchConfiguration("rviz")),
+        remappings=[
+            ("/tf", "tf"),
+            ("/tf_static", "tf_static"),
+        ],
     )
 
     return LaunchDescription(

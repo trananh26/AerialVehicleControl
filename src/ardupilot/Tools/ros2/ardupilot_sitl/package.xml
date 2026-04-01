@@ -4,16 +4,18 @@
 <package format="3">
   <name>ardupilot_sitl</name>
   <version>0.0.0</version>
-  <description>ArduCopter SITL source for the iris Gazebo stack</description>
+  <description>ArduPlane, ArduCopter, ArduRover, ArduSub source</description>
   <maintainer email="rhys.mainwaring@me.com">maintainer</maintainer>
   <license>GPL-3.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>
 
+  <exec_depend>ardupilot_msgs</exec_depend>
   <exec_depend>builtin_interfaces</exec_depend>
   <exec_depend>geographic_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>micro_ros_agent</exec_depend>
   <exec_depend>rosgraph_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
@@ -27,6 +29,8 @@
   <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>ament_cmake_uncrustify</test_depend>
   <test_depend>ament_cmake_xmllint</test_depend>
+
+  <build_depend>ardupilot_msgs</build_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

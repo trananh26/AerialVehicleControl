@@ -1539,6 +1539,15 @@ bool NavEKF3::getVariances(float &velVar, float &posVar, float &hgtVar, Vector3f
     return core[primary].getVariances(velVar, posVar, hgtVar, magVar, tasVar, offset);
 }
 
+// return 1-sigma position and velocity uncertainty from the EKF state error covariance matrix P
+bool NavEKF3::getPosVelUncertainty(float &pos_horiz_m, float &pos_vert_m, float &vel_m_s) const
+{
+    if (core == nullptr) {
+        return false;
+    }
+    return core[primary].getPosVelUncertainty(pos_horiz_m, pos_vert_m, vel_m_s);
+}
+
 // get a source's velocity innovations
 // returns true on success and results are placed in innovations and variances arguments
 bool NavEKF3::getVelInnovationsAndVariancesForSource(AP_NavEKF_Source::SourceXY source, Vector3f &innovations, Vector3f &variances) const
@@ -1591,6 +1600,15 @@ bool NavEKF3::configuredToUseGPSForPosXY(void) const
 {
     // 0 = use 3D velocity, 1 = use 2D velocity, 2 = use no velocity, 3 = do not use GPS
     if (sources.getPosXYSource(primary) == AP_NavEKF_Source::SourceXY::GPS) {
+        return true;
+    }
+    return false;
+}
+
+// check if configured to use GPS for horizontal position estimation
+bool NavEKF3::configuredToUseGPSForPos(void) const
+{
+    if (configuredToUseGPSForPosXY() || sources.getPosZSource(primary) == AP_NavEKF_Source::SourceZ::GPS) {
         return true;
     }
     return false;

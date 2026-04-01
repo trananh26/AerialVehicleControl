@@ -53,7 +53,7 @@ add_custom_target(ardupilot_configure ALL
 )
 
 add_custom_target(ardupilot_build ALL
-  ${WAF_COMMAND} copter ${WAF_ENABLE_DDS} ${WAF_CONFIG} ${ARDUPILOT_WAF_BUILD_ARGS}
+  ${WAF_COMMAND} build ${WAF_ENABLE_DDS} ${WAF_CONFIG} ${ARDUPILOT_WAF_BUILD_ARGS}
   WORKING_DIRECTORY ${ARDUPILOT_ROOT}
 )
 add_dependencies(ardupilot_build ardupilot_configure)
@@ -63,7 +63,13 @@ add_dependencies(ardupilot_build ardupilot_configure)
 
 # Install executables.
 install(PROGRAMS
+  ${ARDUPILOT_ROOT}/build/sitl/bin/antennatracker
   ${ARDUPILOT_ROOT}/build/sitl/bin/arducopter
+  ${ARDUPILOT_ROOT}/build/sitl/bin/arducopter-heli
+  ${ARDUPILOT_ROOT}/build/sitl/bin/arduplane
+  ${ARDUPILOT_ROOT}/build/sitl/bin/ardurover
+  ${ARDUPILOT_ROOT}/build/sitl/bin/ardusub
+  ${ARDUPILOT_ROOT}/build/sitl/bin/blimp
   DESTINATION bin/
 )
 
