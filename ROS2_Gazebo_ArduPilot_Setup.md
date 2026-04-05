@@ -117,15 +117,15 @@ Install `vcstool` if not already installed:
 sudo apt install -y python3-vcstool
 ```
 
-Clone workspace and import all repos via `.repos` file:
+Clone workspace và import tất cả repos:
 
 ```bash
-mkdir -p ~/AerialVehicleControl/src
-cd ~/AerialVehicleControl
-
 # Clone workspace config (setup guide, drone_control, repos file)
 git clone -b feat/arducopter-only-gazebo-sitl \
-  https://github.com/trananh26/AerialVehicleControl.git .
+  https://github.com/trananh26/AerialVehicleControl.git ~/AerialVehicleControl
+
+cd ~/AerialVehicleControl
+mkdir -p src
 
 # Import all source repos (ardupilot, ardupilot_gz, ros_gz, etc.)
 vcs import src < ros2_gz.repos
@@ -143,18 +143,7 @@ rm -f ~/AerialVehicleControl/src/ardupilot/.lock-waf_linux_build
 . ~/.profile
 ```
 
-## 8. Build `ardupilot_gazebo` plugin
-
-Reference: <https://ardupilot.org/dev/docs/sitl-with-gazebo.html>
-
-```bash
-cd ~/AerialVehicleControl/src/ardupilot_gazebo
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo
-make -j"$(nproc)"
-```
-
-## 9. Install ROS dependencies and build with colcon
+## 8. Install ROS dependencies and build with colcon
 
 Reference: <https://ardupilot.org/dev/docs/ros2.html#ros2>
 
@@ -176,13 +165,13 @@ Source workspace:
 source ~/AerialVehicleControl/install/setup.bash
 ```
 
-## 10. Launch simulation
+## 9. Launch simulation
 
 ```bash
 ros2 launch ardupilot_gz_bringup iris_runway.launch.py
 ```
 
-## 11. Run `drone_control` circle mission
+## 10. Run `drone_control` circle mission
 
 After the simulator is running, open a new terminal and source the environments:
 
