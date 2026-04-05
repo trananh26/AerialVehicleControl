@@ -111,12 +111,24 @@ sudo geographiclib-get-geoids egm96-5
 
 ## 7. Create workspace and import source code
 
+Install `vcstool` if not already installed:
+
+```bash
+sudo apt install -y python3-vcstool
+```
+
+Clone workspace and import all repos via `.repos` file:
+
 ```bash
 mkdir -p ~/AerialVehicleControl/src
 cd ~/AerialVehicleControl
 
-# clone source code 
-git clone https://github.com/trananh26/AerialVehicleControl.git
+# Clone workspace config (setup guide, drone_control, repos file)
+git clone -b feat/arducopter-only-gazebo-sitl \
+  https://github.com/trananh26/AerialVehicleControl.git .
+
+# Import all source repos (ardupilot, ardupilot_gz, ros_gz, etc.)
+vcs import src < ros2_gz.repos
 ```
 
 Install ArduPilot prerequisites:
