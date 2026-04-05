@@ -1,0 +1,20 @@
+# External repos — managed via ros2_gz.repos
+src/ardupilot/
+src/ardupilot_gazebo/
+src/ardupilot_gz/
+src/ardupilot_sitl_models/
+src/micro_ros_agent/
+src/ros_gz/
+src/sdformat_urdf/
+
+# ROS2 build artifacts
+build/
+install/
+log/
+
+# ArduPilot runtime files
+eeprom.bin
+mav.parm
+mav.tlog
+mav.tlog.raw
+terrain/
