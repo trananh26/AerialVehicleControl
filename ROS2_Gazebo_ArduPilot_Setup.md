@@ -124,9 +124,6 @@ Clone workspace và import tất cả repos:
 git clone -b feat/arducopter-only-gazebo-sitl \
   https://github.com/trananh26/AerialVehicleControl.git ~/AerialVehicleControl
 
-cd ~/AerialVehicleControl
-mkdir -p src
-
 # Import all source repos (ardupilot, ardupilot_gz, ros_gz, etc.)
 vcs import src < ros2_gz.repos
 ```
