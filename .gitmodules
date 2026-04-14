@@ -1,0 +1,34 @@
+[submodule "src/ardupilot"]
+path = src/ardupilot
+url = https://github.com/NguyenAn20279/ardupilot.git
+branch = feat/arducopter-only-gazebo-sitl
+
+[submodule "src/ardupilot_gazebo"]
+path = src/ardupilot_gazebo
+url = https://github.com/NguyenAn20279/ardupilot_gazebo.git
+branch = feat/x500-with-arm
+
+[submodule "src/ardupilot_gz"]
+path = src/ardupilot_gz
+url = https://github.com/NguyenAn20279/ardupilot_gz.git
+branch = feat/x500-with-arm
+
+[submodule "src/ardupilot_sitl_models"]
+path = src/ardupilot_sitl_models
+url = https://github.com/NguyenAn20279/SITL_Models.git
+branch = feat/arducopter-only-gazebo-sitl
+
+[submodule "src/micro_ros_agent"]
+path = src/micro_ros_agent
+url = https://github.com/NguyenAn20279/micro-ROS-Agent.git
+branch = humble
+
+[submodule "src/ros_gz"]
+path = src/ros_gz
+url = https://github.com/NguyenAn20279/ros_gz.git
+branch = feat/arducopter-only-gazebo-sitl
+
+[submodule "src/sdformat_urdf"]
+path = src/sdformat_urdf
+url = https://github.com/NguyenAn20279/sdformat_urdf.git
+branch = humble
