@@ -117,12 +117,15 @@ Install `vcstool` if not already installed:
 sudo apt install -y python3-vcstool
 ```
 
-Clone workspace và import tất cả repos:
+Clone workspace và tất cả submodules:
 
 ```bash
-# Clone workspace
-git clone --recurse-submodules -b feat/x500-arm-submodules \
-  https://github.com/trananh26/AerialVehicleControl.git
+# Clone workspace + all submodules (1 lệnh duy nhất)
+git clone --recurse-submodules -b x500_model \
+  https://github.com/trananh26/AerialVehicleControl.git ~/AerialVehicleControl
+
+# Nếu đã clone mà quên --recurse-submodules:
+# cd ~/AerialVehicleControl && git submodule update --init --recursive
 ```
 
 Install ArduPilot prerequisites:
