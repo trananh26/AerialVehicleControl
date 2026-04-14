@@ -120,12 +120,9 @@ sudo apt install -y python3-vcstool
 Clone workspace và import tất cả repos:
 
 ```bash
-# Clone workspace config (setup guide, drone_control, repos file)
-git clone -b feat/arducopter-only-gazebo-sitl \
-  https://github.com/trananh26/AerialVehicleControl.git ~/AerialVehicleControl
-
-# Import all source repos (ardupilot, ardupilot_gz, ros_gz, etc.)
-vcs import src < ros2_gz.repos
+# Clone workspace
+git clone --recurse-submodules -b feat/x500-arm-submodules \
+  https://github.com/trananh26/AerialVehicleControl.git
 ```
 
 Install ArduPilot prerequisites:
@@ -165,7 +162,7 @@ source ~/AerialVehicleControl/install/setup.bash
 ## 9. Launch simulation
 
 ```bash
-ros2 launch ardupilot_gz_bringup iris_runway.launch.py
+ros2 launch ardupilot_gz_bringup x500_runway.launch.py
 ```
 
 ## 10. Run `drone_control` circle mission
@@ -184,7 +181,7 @@ ros2 run drone_control circle_mission
 ```
 
 Note:
-1. Keep the launch terminal (`iris_runway.launch.py`) running while this node is active.
+1. Keep the launch terminal (`x500_runway.launch.py`) running while this node is active.
 
 ## Notes
 
