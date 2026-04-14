@@ -160,10 +160,6 @@ class CircleMission(Node):
                 ])
         self.get_logger().info(f"Actual path saved: {actual_file} ({len(self.actual_path.poses)} points)")
 
-
-
-
-
     def add_planned(self, x, y, z):
         pose = PoseStamped()
         pose.header.stamp = self.get_clock().now().to_msg()
