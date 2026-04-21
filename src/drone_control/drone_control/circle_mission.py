@@ -21,6 +21,7 @@ class CircleMission(Node):
     WAIT_GUIDED = 2
     SEND_ARM = 3
     WAIT_ARM = 4
+    WAIT_STABLE = 15   # wait for arm confirmed + stabilisation delay
     SEND_TAKEOFF = 5
     WAIT_TAKEOFF = 6
     CLIMBING = 7
@@ -35,6 +36,9 @@ class CircleMission(Node):
     def __init__(self):
 
         super().__init__('circle_mission')
+
+        self.declare_parameter('save_log', True)
+        self.save_log = self.get_parameter('save_log').get_parameter_value().bool_value
 
         # QoS profile for MAVROS compatibility
         qos_profile = QoSProfile(
@@ -88,6 +92,8 @@ class CircleMission(Node):
         self.mission_state = self.WAIT_CONN
         self.pending_future = None
         self.start_time = None
+        self.arm_time = None
+        self.ARM_STABLE_SEC = 2.0   # seconds to wait after arm before takeoff
 
         # MAVROS services
         self.set_mode_client = self.create_client(SetMode, '/mavros/set_mode')
@@ -153,10 +159,6 @@ class CircleMission(Node):
                     pose.pose.position.z
                 ])
         self.get_logger().info(f"Actual path saved: {actual_file} ({len(self.actual_path.poses)} points)")
-
-
-
-
 
     def add_planned(self, x, y, z):
         pose = PoseStamped()
@@ -227,11 +229,27 @@ class CircleMission(Node):
                 return
             resp = self.pending_future.result()
             if resp and resp.success:
-                self.get_logger().info("Arming accepted")
-                self.mission_state = self.SEND_TAKEOFF
+                self.get_logger().info("Arming accepted, waiting for FCU arm confirmation + stabilisation...")
+                self.arm_time = None   # will be set once State.armed is True
+                self.mission_state = self.WAIT_STABLE
             else:
                 self.get_logger().warn("Arming rejected, retrying...")
                 self.mission_state = self.SEND_ARM
+            return
+
+        # --- WAIT_STABLE: wait until FCU confirms armed AND stabilisation delay passes ---
+        if self.mission_state == self.WAIT_STABLE:
+            if self.current_state and self.current_state.armed:
+                if self.arm_time is None:
+                    self.arm_time = self.get_clock().now()
+                    self.get_logger().info(f"FCU armed confirmed, stabilising for {self.ARM_STABLE_SEC:.1f}s...")
+                elapsed = (self.get_clock().now() - self.arm_time).nanoseconds / 1e9
+                if elapsed >= self.ARM_STABLE_SEC:
+                    self.get_logger().info("Stabilisation done, proceeding to takeoff")
+                    self.mission_state = self.SEND_TAKEOFF
+            else:
+                # State not yet armed — reset timer in case of brief blip
+                self.arm_time = None
             return
 
         # --- SEND_TAKEOFF ---
@@ -386,11 +404,12 @@ class CircleMission(Node):
         # --- WAIT_DISARM: wait until drone actually lands and disarms ---
         if self.mission_state == self.WAIT_DISARM:
             if self.current_state and not self.current_state.armed:
-                self.get_logger().info("Drone disarmed, landing complete. Saving paths...")
-                self.save_paths_to_csv()
+                self.get_logger().info("Drone disarmed, landing complete.")
+                if self.save_log:
+                    self.get_logger().info("Saving paths...")
+                    self.save_paths_to_csv()
                 self.mission_state = self.DONE
             return
-
 
 def main():
 

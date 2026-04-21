@@ -1,0 +1,37 @@
+repositories:
+  # ── Repos có thay đổi → trỏ vào fork ────────────────────────
+  ardupilot:
+    type: git
+    url: https://github.com/NguyenAn20279/ardupilot.git
+    version: feat/arducopter-only-gazebo-sitl
+
+  ardupilot_gz:
+    type: git
+    url: https://github.com/NguyenAn20279/ardupilot_gz.git
+    version: feat/arducopter-only-gazebo-sitl
+
+  ardupilot_sitl_models:
+    type: git
+    url: https://github.com/NguyenAn20279/SITL_Models.git
+    version: feat/arducopter-only-gazebo-sitl
+
+  ros_gz:
+    type: git
+    url: https://github.com/NguyenAn20279/ros_gz.git
+    version: feat/arducopter-only-gazebo-sitl
+
+  # ── Repos chưa sửa → trỏ vào fork, giữ nguyên branch gốc ───
+  ardupilot_gazebo:
+    type: git
+    url: https://github.com/NguyenAn20279/ardupilot_gazebo.git
+    version: ros2
+
+  micro_ros_agent:
+    type: git
+    url: https://github.com/NguyenAn20279/micro-ROS-Agent.git
+    version: humble
+
+  sdformat_urdf:
+    type: git
+    url: https://github.com/NguyenAn20279/sdformat_urdf.git
+    version: humble

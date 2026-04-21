@@ -111,12 +111,21 @@ sudo geographiclib-get-geoids egm96-5
 
 ## 7. Create workspace and import source code
 
-```bash
-mkdir -p ~/AerialVehicleControl/src
-cd ~/AerialVehicleControl
+Install `vcstool` if not already installed:
 
-# clone source code 
-git clone https://github.com/trananh26/AerialVehicleControl.git
+```bash
+sudo apt install -y python3-vcstool
+```
+
+Clone workspace và tất cả submodules:
+
+```bash
+# Clone workspace + all submodules (1 lệnh duy nhất)
+git clone --recurse-submodules -b x500_model \
+  https://github.com/trananh26/AerialVehicleControl.git ~/AerialVehicleControl
+
+# Nếu đã clone mà quên --recurse-submodules:
+# cd ~/AerialVehicleControl && git submodule update --init --recursive
 ```
 
 Install ArduPilot prerequisites:
@@ -131,18 +140,7 @@ rm -f ~/AerialVehicleControl/src/ardupilot/.lock-waf_linux_build
 . ~/.profile
 ```
 
-## 8. Build `ardupilot_gazebo` plugin
-
-Reference: <https://ardupilot.org/dev/docs/sitl-with-gazebo.html>
-
-```bash
-cd ~/AerialVehicleControl/src/ardupilot_gazebo
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo
-make -j"$(nproc)"
-```
-
-## 9. Install ROS dependencies and build with colcon
+## 8. Install ROS dependencies and build with colcon
 
 Reference: <https://ardupilot.org/dev/docs/ros2.html#ros2>
 
@@ -164,13 +162,13 @@ Source workspace:
 source ~/AerialVehicleControl/install/setup.bash
 ```
 
-## 10. Launch simulation
+## 9. Launch simulation
 
 ```bash
-ros2 launch ardupilot_gz_bringup iris_runway.launch.py
+ros2 launch ardupilot_gz_bringup x500_runway.launch.py
 ```
 
-## 11. Run `drone_control` circle mission
+## 10. Run `drone_control` circle mission
 
 After the simulator is running, open a new terminal and source the environments:
 
@@ -186,7 +184,7 @@ ros2 run drone_control circle_mission
 ```
 
 Note:
-1. Keep the launch terminal (`iris_runway.launch.py`) running while this node is active.
+1. Keep the launch terminal (`x500_runway.launch.py`) running while this node is active.
 
 ## Notes
 
