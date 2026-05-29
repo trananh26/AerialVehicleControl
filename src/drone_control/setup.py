@@ -26,6 +26,8 @@ setup(
         'console_scripts': [
             'circle_mission = drone_control.circle_mission:main',
             'takeoff_land_mission = drone_control.takeoff_land_mission:main',
+            'pdsmc_circle_mission = drone_control.pdsmc_circle_mission:main',
+            'pdsmc_mission = drone_control.pdsmc_mission:main',
         ],
     },
 )
