@@ -14,9 +14,7 @@ from __future__ import annotations
 import csv
 import math
 import os
-import signal
 import time
-from contextlib import suppress
 
 import numpy as np
 import rclpy
@@ -125,6 +123,12 @@ class PdsmcCircleMission(Node):
         self._pub_cmd = self.create_publisher(
             TwistStamped, '/mavros/setpoint_velocity/cmd_vel', qos
         )
+        self._planned_path_pub = self.create_publisher(
+            PoseStamped, '/planned_path', 10
+        )
+        self._actual_path_pub = self.create_publisher(
+            PoseStamped, '/actual_path', 10
+        )
 
         self._sub_pose = self.create_subscription(
             PoseStamped, '/mavros/local_position/pose', self._cb_pose, qos
@@ -151,11 +155,11 @@ class PdsmcCircleMission(Node):
 
         self._mission = self.WAIT_CONN
         self._pending: rclpy.task.Future | None = None
-        self._shutdown_requested = False
 
-        signal.signal(signal.SIGINT, self._on_shutdown)
-        signal.signal(signal.SIGTSTP, self._on_shutdown)
-        signal.signal(signal.SIGTERM, self._on_shutdown)
+        # Path tracking for CSV export
+        self._planned_path: list[PoseStamped] = []
+        self._actual_path: list[PoseStamped] = []
+        self._csv_saved = False
 
         z_ref = float(self.get_parameter('takeoff_alt').value)
         R = float(self.get_parameter('circle_radius').value)
@@ -176,7 +180,6 @@ class PdsmcCircleMission(Node):
         hz = float(self.get_parameter('control_rate_hz').value)
         self._Ts = 1.0 / max(hz, 1.0)
         self._control_t0: float | None = None
-        self._circle_t0: float | None = None
 
         self._set_mode = self.create_client(SetMode, '/mavros/set_mode')
         self._arming = self.create_client(CommandBool, '/mavros/cmd/arming')
@@ -200,6 +203,9 @@ class PdsmcCircleMission(Node):
         self._px = msg.pose.position.x
         self._py = msg.pose.position.y
         self._pz = msg.pose.position.z
+        if self._mission >= self.CLIMBING and self._mission <= self.WAIT_DISARM:
+            self._actual_path.append(msg)
+            self._actual_path_pub.publish(msg)
 
     def _cb_vel(self, msg: TwistStamped):
         self._vx = msg.twist.linear.x
@@ -242,20 +248,6 @@ class PdsmcCircleMission(Node):
         req.param2 = float(1_000_000 // max(rate_hz, 1))
         self._cmd_long.call_async(req)
 
-    def _publish_attitude(
-        self, roll: float, pitch: float, yaw: float, throttle: float
-    ):
-        now = self.get_clock().now().to_msg()
-        att_msg = PoseStamped()
-        att_msg.header.stamp = now
-        att_msg.header.frame_id = 'map'
-        att_msg.pose.orientation = euler_to_quat(roll, pitch, yaw)
-        self._pub_attitude.publish(att_msg)
-
-        thr_msg = Float64()
-        thr_msg.data = float(throttle)
-        self._pub_thrust.publish(thr_msg)
-
     def _publish_vel(self, vx: float, vy: float, vz: float = 0.0):
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -269,6 +261,8 @@ class PdsmcCircleMission(Node):
         self._publish_vel(0.0, 0.0, 0.0)
 
     def _timer_cb(self):
+
+        # --- WAIT_CONN ---
         if self._mission == self.WAIT_CONN:
             if self._state_msg and self._state_msg.connected:
                 self.get_logger().info('MAVROS connected — streaming local position @40Hz')
@@ -276,6 +270,7 @@ class PdsmcCircleMission(Node):
                 self._mission = self.SEND_GUIDED
             return
 
+        # --- SEND_GUIDED ---
         if self._mission == self.SEND_GUIDED:
             r = SetMode.Request()
             r.custom_mode = 'GUIDED'
@@ -283,6 +278,7 @@ class PdsmcCircleMission(Node):
             self._mission = self.WAIT_GUIDED
             return
 
+        # --- WAIT_GUIDED ---
         if self._mission == self.WAIT_GUIDED:
             if not self._pending.done():
                 return
@@ -295,6 +291,7 @@ class PdsmcCircleMission(Node):
                 self._mission = self.SEND_GUIDED
             return
 
+        # --- SEND_ARM ---
         if self._mission == self.SEND_ARM:
             r = CommandBool.Request()
             r.value = True
@@ -302,6 +299,7 @@ class PdsmcCircleMission(Node):
             self._mission = self.WAIT_ARM
             return
 
+        # --- WAIT_ARM ---
         if self._mission == self.WAIT_ARM:
             if not self._pending.done():
                 return
@@ -313,6 +311,7 @@ class PdsmcCircleMission(Node):
                 self._mission = self.SEND_ARM
             return
 
+        # --- SEND_TAKEOFF ---
         if self._mission == self.SEND_TAKEOFF:
             r = CommandLong.Request()
             r.command = 22
@@ -321,6 +320,7 @@ class PdsmcCircleMission(Node):
             self._mission = self.WAIT_TAKEOFF
             return
 
+        # --- WAIT_TAKEOFF ---
         if self._mission == self.WAIT_TAKEOFF:
             if not self._pending.done():
                 return
@@ -332,6 +332,7 @@ class PdsmcCircleMission(Node):
                 self._mission = self.SEND_TAKEOFF
             return
 
+        # --- CLIMBING ---
         if self._mission == self.CLIMBING:
             if self._pz >= float(self.get_parameter('takeoff_alt').value) - 0.05:
                 if not self._imu_valid:
@@ -350,6 +351,7 @@ class PdsmcCircleMission(Node):
                 self._mission = self.FLY_TO_START
             return
 
+        # --- FLY_TO_START ---
         if self._mission == self.FLY_TO_START:
             tx = self._xc + self._R
             ty = self._yc
@@ -370,7 +372,9 @@ class PdsmcCircleMission(Node):
             self._publish_vel(speed * dx / dist, speed * dy / dist)
             return
 
+        # --- CIRCLE ---
         if self._mission == self.CIRCLE:
+
             t_circle = time.monotonic() - (self._control_t0 or time.monotonic())
 
             SETTLE_SEC = 1.5
@@ -381,10 +385,22 @@ class PdsmcCircleMission(Node):
             t_run = t_circle - SETTLE_SEC
             theta = self._w * t_run
 
-            # Pure feedforward velocity — giong circle_mission
             vx = -self._R * self._w * math.sin(theta)
             vy =  self._R * self._w * math.cos(theta)
             self._publish_vel(vx, vy)
+
+            # Track planned path
+            xd = self._xc + self._R * math.cos(theta)
+            yd = self._yc + self._R * math.sin(theta)
+            planned = PoseStamped()
+            planned.header.stamp = self.get_clock().now().to_msg()
+            planned.header.frame_id = 'map'
+            planned.pose.position.x = xd
+            planned.pose.position.y = yd
+            planned.pose.position.z = float(self.get_parameter('takeoff_alt').value)
+            planned.pose.orientation.w = 1.0
+            self._planned_path.append(planned)
+            self._planned_path_pub.publish(planned)
 
             if int(t_run) % 5 == 0 and abs(t_run - int(t_run)) < 0.1:
                 xd = self._xc + self._R * math.cos(theta)
@@ -392,8 +408,7 @@ class PdsmcCircleMission(Node):
                 self.get_logger().info(
                     f'circle t={t_run:.1f}s | lap={theta/(2*math.pi):.2f}/{self._laps} | '
                     f'pos=({self._px:.2f},{self._py:.2f},{self._pz:.2f}) | '
-                    f'ref=({xd:.2f},{yd:.2f}) | err=({xd-self._px:.2f},{yd-self._py:.2f}) | '
-                    f'vx={vx:.2f} vy={vy:.2f}'
+                    f'ref=({xd:.2f},{yd:.2f}) | err=({xd-self._px:.2f},{yd-self._py:.2f})'
                 )
 
             if theta / (2.0 * math.pi) >= self._laps:
@@ -403,11 +418,9 @@ class PdsmcCircleMission(Node):
                 self._stop_vel()
                 self._mission = self.FLY_BACK
                 self._control_t0 = None
-                return
-
-            self._try_shutdown_land()
             return
 
+        # --- FLY_BACK ---
         if self._mission == self.FLY_BACK:
             dx = self._xc - self._px
             dy = self._yc - self._py
@@ -421,9 +434,9 @@ class PdsmcCircleMission(Node):
 
             speed = min(float(self.get_parameter('flyback_speed').value), dist)
             self._publish_vel(speed * dx / dist, speed * dy / dist)
-            self._try_shutdown_land()
             return
 
+        # --- SEND_LAND ---
         if self._mission == self.SEND_LAND:
             r = SetMode.Request()
             r.custom_mode = 'LAND'
@@ -431,6 +444,7 @@ class PdsmcCircleMission(Node):
             self._mission = self.WAIT_LAND
             return
 
+        # --- WAIT_LAND ---
         if self._mission == self.WAIT_LAND:
             if not self._pending.done():
                 return
@@ -441,51 +455,76 @@ class PdsmcCircleMission(Node):
                 self._mission = self.SEND_LAND
             return
 
+        # --- WAIT_DISARM ---
         if self._mission == self.WAIT_DISARM:
-            if self._shutdown_requested:
-                self.get_logger().info('Done — shutting down')
-                self._mission = self.DONE
-                rclpy.shutdown()
-                return
             if self._state_msg and not self._state_msg.armed:
                 self.get_logger().info('Done — landed and disarmed')
                 self._mission = self.DONE
+                self._save_paths_to_csv()
+                rclpy.shutdown()
             return
 
-    _shutdown_land_requested: bool = False
+    def _publish_attitude(
+        self, roll: float, pitch: float, yaw: float, throttle: float
+    ):
+        now = self.get_clock().now().to_msg()
+        att_msg = PoseStamped()
+        att_msg.header.stamp = now
+        att_msg.header.frame_id = 'map'
+        att_msg.pose.orientation = euler_to_quat(roll, pitch, yaw)
+        self._pub_attitude.publish(att_msg)
 
-    def _on_shutdown(self, signum, frame):  # noqa: ARG001
-        import sys
-        signame = signal.Signals(signum).name
-        sys.stderr.write(f'Got {signame} — requesting LAND\n')
-        sys.stderr.flush()
-        self._shutdown_requested = True
-        self._shutdown_land_requested = True
+        thr_msg = Float64()
+        thr_msg.data = float(throttle)
+        self._pub_thrust.publish(thr_msg)
 
-    def _try_shutdown_land(self):
-        if not self._shutdown_land_requested:
+    def _save_paths_to_csv(self):
+        if self._csv_saved:
             return
-        if self._mission not in (self.WAIT_LAND, self.WAIT_DISARM, self.DONE):
-            land_req = SetMode.Request()
-            land_req.custom_mode = 'LAND'
-            self._pending = self._set_mode.call_async(land_req)
-            self._mission = self.WAIT_LAND
-            self._shutdown_land_requested = False
-            import sys
-            sys.stderr.write('LAND request sent\n')
-            sys.stderr.flush()
-            return
-        import sys
-        rclpy.shutdown()
+        ts = time.strftime('%Y%m%d_%H%M%S')
+
+        home = os.path.expanduser('~')
+        planned_file = os.path.join(home, f'planned_path_pdsmc_circle_{ts}.csv')
+        with open(planned_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['time_sec', 'time_nsec', 'x', 'y', 'z'])
+            for pose in self._planned_path:
+                writer.writerow([
+                    pose.header.stamp.sec,
+                    pose.header.stamp.nanosec,
+                    pose.pose.position.x,
+                    pose.pose.position.y,
+                    pose.pose.position.z,
+                ])
+        self.get_logger().info(f'Planned path saved: {planned_file} ({len(self._planned_path)} pts)')
+
+        actual_file = os.path.join(home, f'actual_path_pdsmc_circle_{ts}.csv')
+        with open(actual_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['time_sec', 'time_nsec', 'x', 'y', 'z'])
+            for pose in self._actual_path:
+                writer.writerow([
+                    pose.header.stamp.sec,
+                    pose.header.stamp.nanosec,
+                    pose.pose.position.x,
+                    pose.pose.position.y,
+                    pose.pose.position.z,
+                ])
+        self.get_logger().info(f'Actual path saved: {actual_file} ({len(self._actual_path)} pts)')
+        self._csv_saved = True
 
 
 def main():
     rclpy.init()
     node = PdsmcCircleMission()
+
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     except RuntimeError:
         pass
+
     node.destroy_node()
     rclpy.shutdown()
 
