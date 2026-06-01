@@ -100,8 +100,8 @@ class PdsmcCircleMission(Node):
     def __init__(self):
         super().__init__('pdsmc_circle_mission')
 
-        self.declare_parameter('takeoff_alt', 5.0)
-        self.declare_parameter('circle_radius', 5.0)
+        self.declare_parameter('takeoff_alt', 3.0)
+        self.declare_parameter('circle_radius', 3.0)
         self.declare_parameter('circle_w', 0.3)
         self.declare_parameter('control_rate_hz', 40.0)
         self.declare_parameter('auto_land', True)
@@ -160,6 +160,11 @@ class PdsmcCircleMission(Node):
         self._planned_path: list[PoseStamped] = []
         self._actual_path: list[PoseStamped] = []
         self._csv_saved = False
+
+        # Stop publishing when landing to avoid conflicting with ArduPilot
+        self._stop_publishing = False
+        self._land_request_t0: float | None = None
+        self._LAND_TIMEOUT_SEC = 60.0
 
         z_ref = float(self.get_parameter('takeoff_alt').value)
         R = float(self.get_parameter('circle_radius').value)
@@ -249,6 +254,8 @@ class PdsmcCircleMission(Node):
         self._cmd_long.call_async(req)
 
     def _publish_vel(self, vx: float, vy: float, vz: float = 0.0):
+        if self._stop_publishing:
+            return
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
@@ -261,7 +268,7 @@ class PdsmcCircleMission(Node):
         self._publish_vel(0.0, 0.0, 0.0)
 
     def _timer_cb(self):
-
+        # IMPORTANT: use if-elif chain so only ONE state runs per timer tick.
         # --- WAIT_CONN ---
         if self._mission == self.WAIT_CONN:
             if self._state_msg and self._state_msg.connected:
@@ -271,15 +278,14 @@ class PdsmcCircleMission(Node):
             return
 
         # --- SEND_GUIDED ---
-        if self._mission == self.SEND_GUIDED:
+        elif self._mission == self.SEND_GUIDED:
             r = SetMode.Request()
             r.custom_mode = 'GUIDED'
             self._pending = self._set_mode.call_async(r)
             self._mission = self.WAIT_GUIDED
-            return
 
         # --- WAIT_GUIDED ---
-        if self._mission == self.WAIT_GUIDED:
+        elif self._mission == self.WAIT_GUIDED:
             if not self._pending.done():
                 return
             resp = self._pending.result()
@@ -289,18 +295,16 @@ class PdsmcCircleMission(Node):
                 self._mission = self.SEND_ARM
             else:
                 self._mission = self.SEND_GUIDED
-            return
 
         # --- SEND_ARM ---
-        if self._mission == self.SEND_ARM:
+        elif self._mission == self.SEND_ARM:
             r = CommandBool.Request()
             r.value = True
             self._pending = self._arming.call_async(r)
             self._mission = self.WAIT_ARM
-            return
 
         # --- WAIT_ARM ---
-        if self._mission == self.WAIT_ARM:
+        elif self._mission == self.WAIT_ARM:
             if not self._pending.done():
                 return
             resp = self._pending.result()
@@ -309,19 +313,17 @@ class PdsmcCircleMission(Node):
                 self._mission = self.SEND_TAKEOFF
             else:
                 self._mission = self.SEND_ARM
-            return
 
         # --- SEND_TAKEOFF ---
-        if self._mission == self.SEND_TAKEOFF:
+        elif self._mission == self.SEND_TAKEOFF:
             r = CommandLong.Request()
             r.command = 22
             r.param7 = float(self.get_parameter('takeoff_alt').value)
             self._pending = self._cmd_long.call_async(r)
             self._mission = self.WAIT_TAKEOFF
-            return
 
         # --- WAIT_TAKEOFF ---
-        if self._mission == self.WAIT_TAKEOFF:
+        elif self._mission == self.WAIT_TAKEOFF:
             if not self._pending.done():
                 return
             resp = self._pending.result()
@@ -330,10 +332,9 @@ class PdsmcCircleMission(Node):
                 self._mission = self.CLIMBING
             else:
                 self._mission = self.SEND_TAKEOFF
-            return
 
         # --- CLIMBING ---
-        if self._mission == self.CLIMBING:
+        elif self._mission == self.CLIMBING:
             if self._pz >= float(self.get_parameter('takeoff_alt').value) - 0.05:
                 if not self._imu_valid:
                     self.get_logger().warn('IMU not ready — waiting...')
@@ -352,7 +353,7 @@ class PdsmcCircleMission(Node):
             return
 
         # --- FLY_TO_START ---
-        if self._mission == self.FLY_TO_START:
+        elif self._mission == self.FLY_TO_START:
             tx = self._xc + self._R
             ty = self._yc
             dx = tx - self._px
@@ -370,11 +371,9 @@ class PdsmcCircleMission(Node):
 
             speed = min(float(self.get_parameter('flyback_speed').value), dist)
             self._publish_vel(speed * dx / dist, speed * dy / dist)
-            return
 
         # --- CIRCLE ---
-        if self._mission == self.CIRCLE:
-
+        elif self._mission == self.CIRCLE:
             t_circle = time.monotonic() - (self._control_t0 or time.monotonic())
 
             SETTLE_SEC = 1.5
@@ -389,7 +388,6 @@ class PdsmcCircleMission(Node):
             vy =  self._R * self._w * math.cos(theta)
             self._publish_vel(vx, vy)
 
-            # Track planned path
             xd = self._xc + self._R * math.cos(theta)
             yd = self._yc + self._R * math.sin(theta)
             planned = PoseStamped()
@@ -403,8 +401,6 @@ class PdsmcCircleMission(Node):
             self._planned_path_pub.publish(planned)
 
             if int(t_run) % 5 == 0 and abs(t_run - int(t_run)) < 0.1:
-                xd = self._xc + self._R * math.cos(theta)
-                yd = self._yc + self._R * math.sin(theta)
                 self.get_logger().info(
                     f'circle t={t_run:.1f}s | lap={theta/(2*math.pi):.2f}/{self._laps} | '
                     f'pos=({self._px:.2f},{self._py:.2f},{self._pz:.2f}) | '
@@ -418,10 +414,9 @@ class PdsmcCircleMission(Node):
                 self._stop_vel()
                 self._mission = self.FLY_BACK
                 self._control_t0 = None
-            return
 
         # --- FLY_BACK ---
-        if self._mission == self.FLY_BACK:
+        elif self._mission == self.FLY_BACK:
             dx = self._xc - self._px
             dy = self._yc - self._py
             dist = math.sqrt(dx * dx + dy * dy)
@@ -434,35 +429,44 @@ class PdsmcCircleMission(Node):
 
             speed = min(float(self.get_parameter('flyback_speed').value), dist)
             self._publish_vel(speed * dx / dist, speed * dy / dist)
-            return
 
         # --- SEND_LAND ---
-        if self._mission == self.SEND_LAND:
+        elif self._mission == self.SEND_LAND:
+            self._stop_publishing = True
+            self._land_request_t0 = time.monotonic()
             r = SetMode.Request()
             r.custom_mode = 'LAND'
             self._pending = self._set_mode.call_async(r)
             self._mission = self.WAIT_LAND
-            return
 
         # --- WAIT_LAND ---
-        if self._mission == self.WAIT_LAND:
+        elif self._mission == self.WAIT_LAND:
             if not self._pending.done():
                 return
             resp = self._pending.result()
             if resp and resp.mode_sent:
+                self.get_logger().info('LAND mode accepted — waiting for drone to land...')
                 self._mission = self.WAIT_DISARM
             else:
+                elapsed = (time.monotonic() - self._land_request_t0) if self._land_request_t0 else 0
+                self.get_logger().warn(
+                    f'LAND rejected (elapsed={elapsed:.1f}s) — retrying...'
+                )
+                if elapsed > self._LAND_TIMEOUT_SEC:
+                    self.get_logger().error(
+                        f'LAND failed for {elapsed:.1f}s — forcing disarm'
+                    )
+                    self._mission = self.WAIT_DISARM
+                    return
                 self._mission = self.SEND_LAND
-            return
 
         # --- WAIT_DISARM ---
-        if self._mission == self.WAIT_DISARM:
+        elif self._mission == self.WAIT_DISARM:
             if self._state_msg and not self._state_msg.armed:
                 self.get_logger().info('Done — landed and disarmed')
                 self._mission = self.DONE
                 self._save_paths_to_csv()
                 rclpy.shutdown()
-            return
 
     def _publish_attitude(
         self, roll: float, pitch: float, yaw: float, throttle: float
