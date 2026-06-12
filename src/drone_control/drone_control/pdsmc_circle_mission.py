@@ -34,6 +34,12 @@ from drone_control.pdsmc_core import (
 )
 
 
+# MAV_CMD_NAV_LAND = 21
+# Dung CommandLong thay vi SetMode("LAND") vi SetMode co the bi reject
+# khi ArduPilot dang nhan setpoint_attitude lien tuc (dong thoi PDSMC gui).
+MAV_CMD_NAV_LAND = 21
+
+
 def quat_to_euler_rpy(q: Quaternion) -> tuple[float, float, float]:
     x, y, z, w = q.x, q.y, q.z, q.w
     sinr_cosp = 2.0 * (w * x + y * z)
@@ -432,11 +438,22 @@ class PdsmcCircleMission(Node):
 
         # --- SEND_LAND ---
         elif self._mission == self.SEND_LAND:
+            # Dung CommandLong thay vi SetMode("LAND").
+            # Ly do: SetMode("LAND") co the bi reject khi ArduPilot dang nhan
+            # setpoint_attitude lien tuc tu PDSMC. MAV_CMD_NAV_LAND la lenh
+            # chuan de trigger landing sequence — ArduPilot se ngung nhan
+            # setpoint_attitude va bat dau landing protocol.
             self._stop_publishing = True
             self._land_request_t0 = time.monotonic()
-            r = SetMode.Request()
-            r.custom_mode = 'LAND'
-            self._pending = self._set_mode.call_async(r)
+            r = CommandLong.Request()
+            r.command = MAV_CMD_NAV_LAND
+            # param5/6: land at current GPS (NaN = use current)
+            r.param5 = float('nan')
+            r.param6 = float('nan')
+            # param7: descent rate (NaN = use default)
+            r.param7 = float('nan')
+            self._pending = self._cmd_long.call_async(r)
+            self.get_logger().info('MAV_CMD_NAV_LAND sent — waiting for landing...')
             self._mission = self.WAIT_LAND
 
         # --- WAIT_LAND ---
@@ -444,18 +461,29 @@ class PdsmcCircleMission(Node):
             if not self._pending.done():
                 return
             resp = self._pending.result()
-            if resp and resp.mode_sent:
-                self.get_logger().info('LAND mode accepted — waiting for drone to land...')
-                self._mission = self.WAIT_DISARM
+            if resp and resp.success and self._state_msg:
+                mode = getattr(self._state_msg, 'mode', '') or ''
+                if mode == 'LAND':
+                    self.get_logger().info('LAND mode confirmed — waiting for drone to land...')
+                    self._mission = self.WAIT_DISARM
+                else:
+                    self.get_logger().warn(
+                        f'LAND command accepted but mode={mode!r} != LAND — waiting...'
+                    )
+                    return
             else:
                 elapsed = (time.monotonic() - self._land_request_t0) if self._land_request_t0 else 0
                 self.get_logger().warn(
-                    f'LAND rejected (elapsed={elapsed:.1f}s) — retrying...'
+                    f'LAND command failed (elapsed={elapsed:.1f}s) — retrying...'
                 )
                 if elapsed > self._LAND_TIMEOUT_SEC:
                     self.get_logger().error(
                         f'LAND failed for {elapsed:.1f}s — forcing disarm'
                     )
+                    # Force disarm as last resort
+                    disarm_req = CommandBool.Request()
+                    disarm_req.value = False
+                    self._cmd_long.call_async(disarm_req)
                     self._mission = self.WAIT_DISARM
                     return
                 self._mission = self.SEND_LAND

@@ -37,6 +37,12 @@ from drone_control.pdsmc_core import (
 )
 
 
+# MAV_CMD_NAV_LAND = 21
+# Dung CommandLong thay vi SetMode("LAND") vi SetMode co the bi reject
+# khi ArduPilot dang nhan setpoint_attitude lien tuc (dong thoi PDSMC gui).
+MAV_CMD_NAV_LAND = 21
+
+
 def quat_to_euler_rpy(q: Quaternion) -> tuple[float, float, float]:
     x, y, z, w = q.x, q.y, q.z, q.w
     sinr_cosp = 2.0 * (w * x + y * z)
@@ -94,17 +100,18 @@ class PdsmcMission(Node):
     SEND_TAKEOFF = 5
     WAIT_TAKEOFF = 6
     CLIMBING    = 7
-    CONTROL     = 8
-    SEND_LAND   = 9
-    WAIT_LAND   = 10
-    WAIT_DISARM = 11
-    DONE        = 12
+    SETTLING    = 8
+    CONTROL     = 9
+    SEND_LAND   = 10
+    WAIT_LAND   = 11
+    WAIT_DISARM = 12
+    DONE        = 13
 
     def __init__(self):
         super().__init__('pdsmc_mission')
 
-        self.declare_parameter('takeoff_alt', 3)
-        self.declare_parameter('hover_alt', 3)
+        self.declare_parameter('takeoff_alt', 3.0)
+        self.declare_parameter('hover_alt', 3.0)
         self.declare_parameter('control_rate_hz', 40.0)
         self.declare_parameter('auto_land', True)
         self.declare_parameter('control_duration_sec', 30.0)
@@ -319,9 +326,20 @@ class PdsmcMission(Node):
                 if not self._imu_valid:
                     self.get_logger().warn('IMU not ready — waiting...')
                     return
+                self._control_t0 = time.monotonic()
                 self.get_logger().info(
                     f'Altitude reached z={self._pz:.2f}m — '
-                    'settling 1.5s before PDSMC'
+                    'entering SETTLING phase (1.5s)...'
+                )
+                self._mission = self.SETTLING
+
+        # --- SETTLING ---
+        elif self._mission == self.SETTLING:
+            t_settle = time.monotonic() - (self._control_t0 or time.monotonic())
+            self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.5)
+            if t_settle >= 1.5:
+                self.get_logger().info(
+                    f'Settling done — entering PDSMC CONTROL at z={self._pz:.2f}m'
                 )
                 self._control_t0 = time.monotonic()
                 self._mission = self.CONTROL
@@ -329,11 +347,6 @@ class PdsmcMission(Node):
         # --- CONTROL ---
         elif self._mission == self.CONTROL:
             t_run = time.monotonic() - (self._control_t0 or time.monotonic())
-
-            SETTLE_SEC = 1.5
-            if t_run < SETTLE_SEC:
-                self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.5)
-                return
 
             x = self._state_vec()
             out = pdsmc_step(x, self._traj, self._gains, self._plant, t_run, psi=self._psi)
@@ -358,16 +371,29 @@ class PdsmcMission(Node):
             dur = float(self.get_parameter('control_duration_sec').value)
             auto_land = self.get_parameter('auto_land').get_parameter_value().bool_value
             if auto_land and t_run >= dur:
-                self.get_logger().info('Control duration elapsed — switching to LAND')
+                self.get_logger().info(
+                    f'Control duration {dur:.1f}s elapsed — sending MAV_CMD_NAV_LAND'
+                )
                 self._mission = self.SEND_LAND
 
         # --- SEND_LAND ---
         elif self._mission == self.SEND_LAND:
+            # Dung CommandLong thay vi SetMode("LAND").
+            # Ly do: SetMode("LAND") co the bi reject khi ArduPilot dang nhan
+            # setpoint_attitude lien tuc tu PDSMC. MAV_CMD_NAV_LAND la lenh
+            # chuan de trigger landing sequence — ArduPilot se ngung nhan
+            # setpoint_attitude va bat dau landing protocol.
             self._stop_publishing = True
             self._land_request_t0 = time.monotonic()
-            r = SetMode.Request()
-            r.custom_mode = 'LAND'
-            self._pending = self._set_mode.call_async(r)
+            r = CommandLong.Request()
+            r.command = MAV_CMD_NAV_LAND
+            # param5/6: land at current GPS (NaN = use current)
+            r.param5 = float('nan')
+            r.param6 = float('nan')
+            # param7: descent rate (NaN = use default)
+            r.param7 = float('nan')
+            self._pending = self._cmd_long.call_async(r)
+            self.get_logger().info('MAV_CMD_NAV_LAND sent — waiting for landing...')
             self._mission = self.WAIT_LAND
 
         # --- WAIT_LAND ---
@@ -375,18 +401,29 @@ class PdsmcMission(Node):
             if not self._pending.done():
                 return
             resp = self._pending.result()
-            if resp and resp.mode_sent:
-                self.get_logger().info('LAND mode accepted — waiting for drone to land...')
-                self._mission = self.WAIT_DISARM
+            if resp and resp.success and self._state_msg:
+                mode = getattr(self._state_msg, 'mode', '') or ''
+                if mode == 'LAND':
+                    self.get_logger().info('LAND mode confirmed — waiting for drone to land...')
+                    self._mission = self.WAIT_DISARM
+                else:
+                    self.get_logger().warn(
+                        f'LAND command accepted but mode={mode!r} != LAND — waiting...'
+                    )
+                    return
             else:
                 elapsed = (time.monotonic() - self._land_request_t0) if self._land_request_t0 else 0
                 self.get_logger().warn(
-                    f'LAND mode rejected (elapsed={elapsed:.1f}s) — retrying...'
+                    f'LAND command failed (elapsed={elapsed:.1f}s) — retrying...'
                 )
                 if elapsed > self._LAND_TIMEOUT_SEC:
                     self.get_logger().error(
                         f'LAND failed for {elapsed:.1f}s — forcing disarm'
                     )
+                    # Force disarm as last resort
+                    disarm_req = CommandBool.Request()
+                    disarm_req.value = False
+                    self._cmd_long.call_async(disarm_req)
                     self._mission = self.WAIT_DISARM
                     return
                 self._mission = self.SEND_LAND
