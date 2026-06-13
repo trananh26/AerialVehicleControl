@@ -1,16 +1,11 @@
-# PDSMC hover mission — port tu run_PDSMC.m, quy dao: x=0,y=0,z=3m,psi=0
+# PDSMC hover mission — bay len, giu o do cao, ha canh sau 30s
 #
-# Kien truc:
-#   PDSMC (port MATLAB goc)  -->  setpoint_attitude  -->  ArduPilot inner loops
-#   Thuong ARDUPLANE inner loop xu ly attitude (roll/pitch/yaw) + thrust.
-#   Chu khong phai velocity interface nhu AI cu gen (that bai vi gains khong phu hop).
+# Kien truc: PDSMC (port MATLAB goc) cho CONTROL, GUIDED cho takeoff/landing.
+#   Cu phap, state machine, Qos, timing giong y
+#   takeoff_land_mission.py (da test OK tren mo phong va thuc nghiem).
 #
-#   Ly do chon setpoint_attitude thay vi cmd_vel:
-#     - PDSMC tinh phides, thetades, U1 (thrust) — dang attitude/thrust
-#     - ArduPilot co san inner PID cho roll/pitch — ta chi can gui goc mong muon
-#     - Tranh phai map attitude -> velocity (phep bien doi nhieu thong tin)
-#
-# Tac vu: GUIDED -> ARM -> TAKEOFF -> PDSMC (hover 3m) -> LAND
+# Tac vu: GUIDED -> ARM -> TAKEOFF -> CLIMBING ->
+#         SETTLING (1.5s) -> CONTROL (PDSMC hover) -> LAND
 
 from __future__ import annotations
 
@@ -22,25 +17,13 @@ import time
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, Quaternion, TwistStamped
+from nav_msgs.msg import Path
 from mavros_msgs.msg import State
-from mavros_msgs.srv import CommandLong, SetMode, CommandBool
+from mavros_msgs.srv import SetMode, CommandBool, CommandLong
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float64
-
-from drone_control.pdsmc_core import (
-    HoverTrajectory,
-    PDSMCGains,
-    QuadPlantParams,
-    pdsmc_step,
-)
-
-
-# MAV_CMD_NAV_LAND = 21
-# Dung CommandLong thay vi SetMode("LAND") vi SetMode co the bi reject
-# khi ArduPilot dang nhan setpoint_attitude lien tuc (dong thoi PDSMC gui).
-MAV_CMD_NAV_LAND = 21
 
 
 def quat_to_euler_rpy(q: Quaternion) -> tuple[float, float, float]:
@@ -57,9 +40,8 @@ def quat_to_euler_rpy(q: Quaternion) -> tuple[float, float, float]:
 
 
 def body_rates_from_euler_rates(
-    phi: float, theta: float, phi_d: float, theta_d: float, psi_d: float
+    phi: float, theta: float, phi_d: float, theta_d: float, psi_d: float,
 ) -> tuple[float, float, float]:
-    """Doi euler rates -> body angular rates (p,q,r)."""
     sp, cp = math.sin(phi), math.cos(phi)
     sq, cq = math.sin(theta), math.cos(theta)
     ct = max(abs(cq), 1e-6)
@@ -70,7 +52,6 @@ def body_rates_from_euler_rates(
 
 
 def euler_to_quat(roll: float, pitch: float, yaw: float) -> Quaternion:
-    """Chuyen Euler (rad) -> Quaternion."""
     cy = math.cos(yaw * 0.5)
     sy = math.sin(yaw * 0.5)
     cp = math.cos(pitch * 0.5)
@@ -85,13 +66,8 @@ def euler_to_quat(roll: float, pitch: float, yaw: float) -> Quaternion:
     return q
 
 
-def thrust_from_U1(U1: float, plant: QuadPlantParams) -> float:
-    g_max_cell = 15.0
-    throttle = float(np.clip(U1 / (plant.m * g_max_cell), 0.0, 1.0))
-    return throttle
-
-
 class PdsmcMission(Node):
+
     WAIT_CONN  = 0
     SEND_GUIDED = 1
     WAIT_GUIDED = 2
@@ -108,13 +84,8 @@ class PdsmcMission(Node):
     DONE        = 13
 
     def __init__(self):
-        super().__init__('pdsmc_mission')
 
-        self.declare_parameter('takeoff_alt', 3.0)
-        self.declare_parameter('hover_alt', 3.0)
-        self.declare_parameter('control_rate_hz', 40.0)
-        self.declare_parameter('auto_land', True)
-        self.declare_parameter('control_duration_sec', 30.0)
+        super().__init__('pdsmc_mission')
 
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -122,115 +93,127 @@ class PdsmcMission(Node):
             depth=10,
         )
 
-        self._pub_attitude = self.create_publisher(
-            PoseStamped, '/mavros/setpoint_attitude/attitude', qos
+        self.pub_attitude = self.create_publisher(
+            PoseStamped, '/mavros/setpoint_attitude/attitude', qos,
         )
-        self._pub_thrust = self.create_publisher(
-            Float64, '/mavros/setpoint_attitude/accel_thrust_throttle', qos
+        self.pub_thrust = self.create_publisher(
+            Float64, '/mavros/setpoint_attitude/accel_thrust_throttle', qos,
         )
-        self._pub_cmd = self.create_publisher(
-            TwistStamped, '/mavros/setpoint_velocity/cmd_vel', qos
-        )
-        self._planned_path_pub = self.create_publisher(
-            PoseStamped, '/planned_path', 10
-        )
-        self._actual_path_pub = self.create_publisher(
-            PoseStamped, '/actual_path', 10
-        )
+        self.planned_path_pub = self.create_publisher(Path, '/planned_path', 10)
+        self.actual_path_pub = self.create_publisher(Path, '/actual_path', 10)
+        self.planned_path = Path()
+        self.planned_path.header.frame_id = 'map'
+        self.actual_path = Path()
+        self.actual_path.header.frame_id = 'map'
 
-        self._sub_pose = self.create_subscription(
-            PoseStamped, '/mavros/local_position/pose', self._cb_pose, qos
-        )
-        self._sub_vel = self.create_subscription(
-            TwistStamped,
-            '/mavros/local_position/velocity_local',
-            self._cb_vel,
+        self.local_pos_sub = self.create_subscription(
+            PoseStamped,
+            '/mavros/local_position/pose',
+            self.local_pos_callback,
             qos,
         )
-        self._sub_state = self.create_subscription(
-            State, '/mavros/state', self._cb_state, qos
+        self.vel_sub = self.create_subscription(
+            TwistStamped,
+            '/mavros/local_position/velocity_local',
+            self.vel_callback,
+            qos,
         )
-        self._sub_imu = self.create_subscription(
-            Imu, '/mavros/imu/data', self._cb_imu, qos
+        self.state_sub = self.create_subscription(
+            State, '/mavros/state', self.state_callback, qos,
+        )
+        self.imu_sub = self.create_subscription(
+            Imu, '/mavros/imu/data', self.imu_callback, qos,
         )
 
-        self._px = self._py = self._pz = 0.0
-        self._vx = self._vy = self._vz = 0.0
-        self._phi = self._theta = self._psi = 0.0
-        self._phid = self._thetd = self._psid = 0.0
+        self.current_z = 0.0
+        self.current_state: State | None = None
+
+        self._px = 0.0
+        self._py = 0.0
+        self._pz = 0.0
+        self._vx = 0.0
+        self._vy = 0.0
+        self._vz = 0.0
+        self._phi = 0.0
+        self._theta = 0.0
+        self._psi = 0.0
+        self._phid = 0.0
+        self._thetd = 0.0
+        self._psid = 0.0
         self._imu_valid = False
-        self._state_msg: State | None = None
 
-        self._mission = self.WAIT_CONN
-        self._pending: rclpy.task.Future | None = None
+        self.mission_state = self.WAIT_CONN
+        self.pending_future: rclpy.task.Future | None = None
+        self.control_t0: float | None = None
 
-        # Path tracking for CSV export
-        self._planned_path: list[PoseStamped] = []
-        self._actual_path: list[PoseStamped] = []
-        self._csv_saved = False
+        self.set_mode_client = self.create_client(SetMode, '/mavros/set_mode')
+        self.arming_client = self.create_client(CommandBool, '/mavros/cmd/arming')
+        self.takeoff_client = self.create_client(CommandLong, '/mavros/cmd/command')
 
-        # Stop attitude/thrust when landing — prevents conflicting commands to ArduPilot
-        self._stop_publishing = False
+        while not self.set_mode_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Waiting for set_mode service...')
+        while not self.arming_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Waiting for arming service...')
+        while not self.takeoff_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Waiting for takeoff service...')
 
-        # Track LAND retry timeout to avoid infinite loop
-        self._land_request_t0: float | None = None
-        self._LAND_TIMEOUT_SEC = 60.0
+        self.timer = self.create_timer(0.05, self.timer_callback)
 
-        z_ref = float(self.get_parameter('hover_alt').value)
-        self._traj = HoverTrajectory(z_const=z_ref)
-        self._gains = PDSMCGains()
-        self._plant = QuadPlantParams()
+        self.get_logger().info('PDSMC hover node ready — 30s hover then land')
 
-        hz = float(self.get_parameter('control_rate_hz').value)
-        self._Ts = 1.0 / max(hz, 1.0)
-        self._control_t0: float | None = None
-
-        self._set_mode = self.create_client(SetMode, '/mavros/set_mode')
-        self._arming = self.create_client(CommandBool, '/mavros/cmd/arming')
-        self._cmd_long = self.create_client(CommandLong, '/mavros/cmd/command')
-
-        for name, cli in [
-            ('set_mode', self._set_mode),
-            ('arming', self._arming),
-            ('command', self._cmd_long),
-        ]:
-            while not cli.wait_for_service(timeout_sec=1.0):
-                self.get_logger().info(f'Waiting for {name} service...')
-
-        self._timer = self.create_timer(self._Ts, self._timer_cb)
-        self.get_logger().info(
-            f'PDSMC hover node ready — rate={hz}Hz, hover_z={z_ref}m, '
-            f'duration={float(self.get_parameter("control_duration_sec").value)}s'
-        )
-
-    def _cb_pose(self, msg: PoseStamped):
+    # --- callbacks ---
+    def local_pos_callback(self, msg: PoseStamped):
         self._px = msg.pose.position.x
         self._py = msg.pose.position.y
         self._pz = msg.pose.position.z
-        if self._mission >= self.CLIMBING and self._mission <= self.WAIT_DISARM:
-            self._actual_path.append(msg)
-            self._actual_path_pub.publish(msg)
+        self.current_z = msg.pose.position.z
+        if self.mission_state >= self.CLIMBING and self.mission_state <= self.WAIT_DISARM:
+            pose = PoseStamped()
+            pose.header = msg.header
+            pose.header.frame_id = 'map'
+            pose.pose = msg.pose
+            self.actual_path.poses.append(pose)
+            self.actual_path.header.stamp = msg.header.stamp
+            self.actual_path_pub.publish(self.actual_path)
 
-    def _cb_vel(self, msg: TwistStamped):
+    def vel_callback(self, msg: TwistStamped):
         self._vx = msg.twist.linear.x
         self._vy = msg.twist.linear.y
         self._vz = msg.twist.linear.z
 
-    def _cb_state(self, msg: State):
-        self._state_msg = msg
+    def state_callback(self, msg: State):
+        self.current_state = msg
 
-    def _cb_imu(self, msg: Imu):
+    def imu_callback(self, msg: Imu):
         self._imu_valid = True
         self._phi, self._theta, self._psi = quat_to_euler_rpy(msg.orientation)
         p = msg.angular_velocity.x
         q = msg.angular_velocity.y
         r = msg.angular_velocity.z
         phi_d, theta_d, psi_d = body_rates_from_euler_rates(
-            self._phi, self._theta, p, q, r
+            self._phi, self._theta, p, q, r,
         )
         self._phid = phi_d
         self._thetd = theta_d
         self._psid = psi_d
+
+    def set_stream_rate(self, stream_id: int, rate: int):
+        req = CommandLong.Request()
+        req.command = 511
+        req.param1 = float(stream_id)
+        req.param2 = float(1_000_000 // max(rate, 1))
+        self.takeoff_client.call_async(req)
+
+    def _publish_attitude(self, roll: float, pitch: float, yaw: float, throttle: float):
+        now = self.get_clock().now().to_msg()
+        att_msg = PoseStamped()
+        att_msg.header.stamp = now
+        att_msg.header.frame_id = 'map'
+        att_msg.pose.orientation = euler_to_quat(roll, pitch, yaw)
+        self.pub_attitude.publish(att_msg)
+        thr_msg = Float64()
+        thr_msg.data = float(throttle)
+        self.pub_thrust.publish(thr_msg)
 
     def _state_vec(self) -> np.ndarray:
         return np.array(
@@ -245,274 +228,237 @@ class PdsmcMission(Node):
             dtype=float,
         )
 
-    def _set_stream_rate(self, stream_id: int, rate_hz: int):
-        req = CommandLong.Request()
-        req.command = 511
-        req.param1 = float(stream_id)
-        req.param2 = float(1_000_000 // max(rate_hz, 1))
-        self._cmd_long.call_async(req)
+    # --- state machine ---
+    def timer_callback(self):
 
-    def _timer_cb(self):
-        # IMPORTANT: use if-elif chain so only ONE state runs per timer tick.
-        # Mixing independent `if` blocks causes race conditions where multiple
-        # states execute concurrently and overwrite _pending / _mission.
         # --- WAIT_CONN ---
-        if self._mission == self.WAIT_CONN:
-            if self._state_msg and self._state_msg.connected:
-                self.get_logger().info('MAVROS connected — streaming local position @40Hz')
-                self._set_stream_rate(32, 40)
-                self._mission = self.SEND_GUIDED
+        if self.mission_state == self.WAIT_CONN:
+            if self.current_state and self.current_state.connected:
+                self.get_logger().info('MAVROS connected')
+                self.set_stream_rate(32, 20)
+                self.mission_state = self.SEND_GUIDED
             return
 
         # --- SEND_GUIDED ---
-        elif self._mission == self.SEND_GUIDED:
-            r = SetMode.Request()
-            r.custom_mode = 'GUIDED'
-            self._pending = self._set_mode.call_async(r)
-            self._mission = self.WAIT_GUIDED
+        if self.mission_state == self.SEND_GUIDED:
+            req = SetMode.Request()
+            req.custom_mode = 'GUIDED'
+            self.pending_future = self.set_mode_client.call_async(req)
+            self.get_logger().info('Switching to GUIDED mode...')
+            self.mission_state = self.WAIT_GUIDED
+            return
 
         # --- WAIT_GUIDED ---
-        elif self._mission == self.WAIT_GUIDED:
-            if not self._pending.done():
+        if self.mission_state == self.WAIT_GUIDED:
+            if not self.pending_future.done():
                 return
-            resp = self._pending.result()
-            ok = resp is not None and resp.mode_sent
-            if ok:
-                self.get_logger().info('GUIDED mode set — arming...')
-                self._mission = self.SEND_ARM
+            resp = self.pending_future.result()
+            if resp and resp.mode_sent:
+                self.get_logger().info('GUIDED mode accepted')
+                self.mission_state = self.SEND_ARM
             else:
-                self._mission = self.SEND_GUIDED
+                self.get_logger().warn('GUIDED mode rejected, retrying...')
+                self.mission_state = self.SEND_GUIDED
+            return
 
         # --- SEND_ARM ---
-        elif self._mission == self.SEND_ARM:
-            r = CommandBool.Request()
-            r.value = True
-            self._pending = self._arming.call_async(r)
-            self._mission = self.WAIT_ARM
+        if self.mission_state == self.SEND_ARM:
+            req = CommandBool.Request()
+            req.value = True
+            self.pending_future = self.arming_client.call_async(req)
+            self.get_logger().info('Arming vehicle...')
+            self.mission_state = self.WAIT_ARM
+            return
 
         # --- WAIT_ARM ---
-        elif self._mission == self.WAIT_ARM:
-            if not self._pending.done():
+        if self.mission_state == self.WAIT_ARM:
+            if not self.pending_future.done():
                 return
-            resp = self._pending.result()
+            resp = self.pending_future.result()
             if resp and resp.success:
-                self.get_logger().info('Armed — sending takeoff...')
-                self._mission = self.SEND_TAKEOFF
+                self.get_logger().info('Arming accepted')
+                self.mission_state = self.SEND_TAKEOFF
             else:
-                self._mission = self.SEND_ARM
+                self.get_logger().warn('Arming rejected, retrying...')
+                self.mission_state = self.SEND_ARM
+            return
 
         # --- SEND_TAKEOFF ---
-        elif self._mission == self.SEND_TAKEOFF:
-            r = CommandLong.Request()
-            r.command = 22
-            r.param7 = float(self.get_parameter('takeoff_alt').value)
-            self._pending = self._cmd_long.call_async(r)
-            self._mission = self.WAIT_TAKEOFF
+        if self.mission_state == self.SEND_TAKEOFF:
+            req = CommandLong.Request()
+            req.command = 22
+            req.param1 = 0.0
+            req.param2 = 0.0
+            req.param3 = 0.0
+            req.param4 = float('nan')
+            req.param5 = 0.0
+            req.param6 = 0.0
+            req.param7 = 3.0
+            self.pending_future = self.takeoff_client.call_async(req)
+            self.get_logger().info('Sending takeoff command...')
+            self.mission_state = self.WAIT_TAKEOFF
+            return
 
         # --- WAIT_TAKEOFF ---
-        elif self._mission == self.WAIT_TAKEOFF:
-            if not self._pending.done():
+        if self.mission_state == self.WAIT_TAKEOFF:
+            if not self.pending_future.done():
                 return
-            resp = self._pending.result()
+            resp = self.pending_future.result()
             if resp and resp.success:
-                self.get_logger().info('Takeoff accepted — climbing...')
-                self._mission = self.CLIMBING
+                self.get_logger().info('Takeoff accepted, climbing to 3.0m...')
+                self.mission_state = self.CLIMBING
             else:
-                self._mission = self.SEND_TAKEOFF
+                self.get_logger().warn('Takeoff rejected, retrying...')
+                self.mission_state = self.SEND_TAKEOFF
+            return
 
         # --- CLIMBING ---
-        elif self._mission == self.CLIMBING:
-            if self._pz >= float(self.get_parameter('takeoff_alt').value) - 0.05:
+        if self.mission_state == self.CLIMBING:
+            if self.current_z >= 3.0:
                 if not self._imu_valid:
                     self.get_logger().warn('IMU not ready — waiting...')
                     return
-                self._control_t0 = time.monotonic()
                 self.get_logger().info(
-                    f'Altitude reached z={self._pz:.2f}m — '
-                    'entering SETTLING phase (1.5s)...'
+                    f'Altitude reached z={self.current_z:.2f}m — settling 1.5s...',
                 )
-                self._mission = self.SETTLING
+                self.control_t0 = time.time()
+                self.mission_state = self.SETTLING
+            return
 
         # --- SETTLING ---
-        elif self._mission == self.SETTLING:
-            t_settle = time.monotonic() - (self._control_t0 or time.monotonic())
+        if self.mission_state == self.SETTLING:
+            t_settle = time.time() - self.control_t0
             self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.5)
             if t_settle >= 1.5:
+                self.control_t0 = time.time()
                 self.get_logger().info(
-                    f'Settling done — entering PDSMC CONTROL at z={self._pz:.2f}m'
+                    f'Settling done — entering PDSMC CONTROL at z={self.current_z:.2f}m',
                 )
-                self._control_t0 = time.monotonic()
-                self._mission = self.CONTROL
+                self.mission_state = self.CONTROL
+            return
 
-        # --- CONTROL ---
-        elif self._mission == self.CONTROL:
-            t_run = time.monotonic() - (self._control_t0 or time.monotonic())
+        # --- CONTROL: PDSMC hover ---
+        if self.mission_state == self.CONTROL:
+            t_run = time.time() - self.control_t0
 
-            x = self._state_vec()
-            out = pdsmc_step(x, self._traj, self._gains, self._plant, t_run, psi=self._psi)
+            m = 0.8
+            g = 9.81
+            z_ref = 3.0
+            ez   = z_ref - self._pz
+            ez_d = -self._vz
+            kp1, kd1, H1, lam1 = 100.0, 40.0, 160.0, 100.0
+            U1_raw = m * g + kp1 * ez + kd1 * ez_d + H1 * math.tanh(ez_d + lam1 * ez)
+            U1 = max(0.3 * m * g, U1_raw)
+            throttle = float(np.clip(U1 / (m * 15.0), 0.0, 1.0))
 
-            throttle = thrust_from_U1(out["U1"], self._plant)
+            kpx, kdx, Hx, lamx = 1.5, 1.0, 0.5, 0.5
+            kpy, kdy, Hy, lamy = 1.5, 1.0, 0.5, 0.5
+            ex   = 0.0 - self._px
+            ex_d = 0.0 - self._vx
+            ey   = 0.0 - self._py
+            ey_d = 0.0 - self._vy
+            Ux = kpx * ex + kdx * ex_d + Hx * math.tanh(ex_d + lamx * ex)
+            Uy = kpy * ey + kdy * ey_d + Hy * math.tanh(ey_d + lamy * ey)
+
+            T_norm = max(U1 / m, 1e-6)
+            sinphi = (Ux * math.sin(self._psi) - Uy * math.cos(self._psi)) / T_norm
+            phides = math.asin(float(np.clip(sinphi, -1.0, 1.0)))
+            sintheta = (Ux * math.cos(self._psi) + Uy * math.sin(self._psi)) / (
+                T_norm * max(math.cos(phides), 1e-6)
+            )
+            thetades = math.asin(float(np.clip(sintheta, -1.0, 1.0)))
+
             self._publish_attitude(
-                roll=out["phides"],
-                pitch=out["thetades"],
-                yaw=self._psi,
-                throttle=throttle,
+                roll=phides, pitch=thetades, yaw=self._psi, throttle=throttle,
             )
 
-            if int(t_run) % 5 == 0 and abs(t_run - int(t_run)) < self._Ts:
+            if int(t_run) % 5 == 0 and abs(t_run - int(t_run)) < 0.1:
                 self.get_logger().info(
                     f't={t_run:.1f}s | pos=({self._px:.2f},{self._py:.2f},{self._pz:.2f}) '
                     f'| phi={math.degrees(self._phi):.1f}deg the={math.degrees(self._theta):.1f}deg '
-                    f'| phides={math.degrees(out["phides"]):.2f}deg '
-                    f'thdes={math.degrees(out["thetades"]):.2f}deg '
-                    f'U1={out["U1"]:.2f}N thr={throttle:.3f}'
+                    f'| phides={math.degrees(phides):.2f}deg thdes={math.degrees(thetades):.2f}deg '
+                    f'U1={U1:.2f}N thr={throttle:.3f}',
                 )
 
-            dur = float(self.get_parameter('control_duration_sec').value)
-            auto_land = self.get_parameter('auto_land').get_parameter_value().bool_value
-            if auto_land and t_run >= dur:
+            self.add_planned(0.0, 0.0, 3.0)
+
+            dur = 30.0
+            if t_run >= dur:
                 self.get_logger().info(
-                    f'Control duration {dur:.1f}s elapsed — sending MAV_CMD_NAV_LAND'
+                    f'Control duration {dur:.1f}s elapsed — landing',
                 )
-                self._mission = self.SEND_LAND
+                self.mission_state = self.SEND_LAND
+
+            return
 
         # --- SEND_LAND ---
-        elif self._mission == self.SEND_LAND:
-            # Dung CommandLong thay vi SetMode("LAND").
-            # Ly do: SetMode("LAND") co the bi reject khi ArduPilot dang nhan
-            # setpoint_attitude lien tuc tu PDSMC. MAV_CMD_NAV_LAND la lenh
-            # chuan de trigger landing sequence — ArduPilot se ngung nhan
-            # setpoint_attitude va bat dau landing protocol.
-            self._stop_publishing = True
-            self._land_request_t0 = time.monotonic()
-            r = CommandLong.Request()
-            r.command = MAV_CMD_NAV_LAND
-            # param5/6: land at current GPS (NaN = use current)
-            r.param5 = float('nan')
-            r.param6 = float('nan')
-            # param7: descent rate (NaN = use default)
-            r.param7 = float('nan')
-            self._pending = self._cmd_long.call_async(r)
-            self.get_logger().info('MAV_CMD_NAV_LAND sent — waiting for landing...')
-            self._mission = self.WAIT_LAND
+        if self.mission_state == self.SEND_LAND:
+            req = SetMode.Request()
+            req.custom_mode = 'LAND'
+            self.pending_future = self.set_mode_client.call_async(req)
+            self.get_logger().info('Sending LAND command...')
+            self.mission_state = self.WAIT_LAND
+            return
 
         # --- WAIT_LAND ---
-        elif self._mission == self.WAIT_LAND:
-            if not self._pending.done():
+        if self.mission_state == self.WAIT_LAND:
+            if not self.pending_future.done():
                 return
-            resp = self._pending.result()
-            if resp and resp.success and self._state_msg:
-                mode = getattr(self._state_msg, 'mode', '') or ''
-                if mode == 'LAND':
-                    self.get_logger().info('LAND mode confirmed — waiting for drone to land...')
-                    self._mission = self.WAIT_DISARM
-                else:
-                    self.get_logger().warn(
-                        f'LAND command accepted but mode={mode!r} != LAND — waiting...'
-                    )
-                    return
+            resp = self.pending_future.result()
+            if resp and resp.mode_sent:
+                self.get_logger().info('LAND mode accepted, waiting for drone to land...')
+                self.mission_state = self.WAIT_DISARM
             else:
-                elapsed = (time.monotonic() - self._land_request_t0) if self._land_request_t0 else 0
-                self.get_logger().warn(
-                    f'LAND command failed (elapsed={elapsed:.1f}s) — retrying...'
-                )
-                if elapsed > self._LAND_TIMEOUT_SEC:
-                    self.get_logger().error(
-                        f'LAND failed for {elapsed:.1f}s — forcing disarm'
-                    )
-                    # Force disarm as last resort
-                    disarm_req = CommandBool.Request()
-                    disarm_req.value = False
-                    self._cmd_long.call_async(disarm_req)
-                    self._mission = self.WAIT_DISARM
-                    return
-                self._mission = self.SEND_LAND
+                self.get_logger().warn('LAND mode rejected, retrying...')
+                self.mission_state = self.SEND_LAND
+            return
 
         # --- WAIT_DISARM ---
-        elif self._mission == self.WAIT_DISARM:
-            if self._state_msg and not self._state_msg.armed:
-                self.get_logger().info('Done — landed and disarmed')
-                self._mission = self.DONE
-                self._save_paths_to_csv()
-                rclpy.shutdown()
-
-    def _save_paths_to_csv(self):
-        if self._csv_saved:
+        if self.mission_state == self.WAIT_DISARM:
+            if self.current_state and not self.current_state.armed:
+                self.get_logger().info('Drone disarmed, mission complete. Saving paths...')
+                self.save_paths_to_csv()
+                self.mission_state = self.DONE
             return
-        ts = time.strftime('%Y%m%d_%H%M%S')
 
+    def save_paths_to_csv(self):
         home = os.path.expanduser('~')
-        planned_file = os.path.join(home, f'planned_path_pdsmc_{ts}.csv')
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        planned_file = os.path.join(home, f'pdsmc_planned_{ts}.csv')
         with open(planned_file, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['time_sec', 'time_nsec', 'x', 'y', 'z'])
-            for pose in self._planned_path:
-                writer.writerow([
-                    pose.header.stamp.sec,
-                    pose.header.stamp.nanosec,
-                    pose.pose.position.x,
-                    pose.pose.position.y,
-                    pose.pose.position.z,
-                ])
-        self.get_logger().info(f'Planned path saved: {planned_file} ({len(self._planned_path)} pts)')
+            writer.writerow(['time_sec', 'x', 'y', 'z'])
+            for pose in self.planned_path.poses:
+                t = float(pose.header.stamp.sec) + float(pose.header.stamp.nanosec) * 1e-9
+                writer.writerow([t, pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
+        self.get_logger().info(f'Planned path saved: {planned_file} ({len(self.planned_path.poses)} points)')
 
-        actual_file = os.path.join(home, f'actual_path_pdsmc_{ts}.csv')
+        actual_file = os.path.join(home, f'pdsmc_actual_{ts}.csv')
         with open(actual_file, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['time_sec', 'time_nsec', 'x', 'y', 'z'])
-            for pose in self._actual_path:
-                writer.writerow([
-                    pose.header.stamp.sec,
-                    pose.header.stamp.nanosec,
-                    pose.pose.position.x,
-                    pose.pose.position.y,
-                    pose.pose.position.z,
-                ])
-        self.get_logger().info(f'Actual path saved: {actual_file} ({len(self._actual_path)} pts)')
-        self._csv_saved = True
+            writer.writerow(['time_sec', 'x', 'y', 'z'])
+            for pose in self.actual_path.poses:
+                t = float(pose.header.stamp.sec) + float(pose.header.stamp.nanosec) * 1e-9
+                writer.writerow([t, pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
+        self.get_logger().info(f'Actual path saved: {actual_file} ({len(self.actual_path.poses)} points)')
 
-    def _publish_attitude(
-        self, roll: float, pitch: float, yaw: float, throttle: float
-    ):
-        # Stop publishing attitude/thrust when landing to avoid conflicting with ArduPilot
-        if self._stop_publishing:
-            return
-
+    def add_planned(self, x: float, y: float, z: float):
         now = self.get_clock().now().to_msg()
-        att_msg = PoseStamped()
-        att_msg.header.stamp = now
-        att_msg.header.frame_id = 'map'
-        att_msg.pose.orientation = euler_to_quat(roll, pitch, yaw)
-        self._pub_attitude.publish(att_msg)
-
-        thr_msg = Float64()
-        thr_msg.data = float(throttle)
-        self._pub_thrust.publish(thr_msg)
-
-        # Track planned path for CSV
-        if self._mission == self.CONTROL:
-            planned = PoseStamped()
-            planned.header.stamp = now
-            planned.header.frame_id = 'map'
-            planned.pose.position.x = self._px
-            planned.pose.position.y = self._py
-            planned.pose.position.z = self._pz
-            planned.pose.orientation.w = 1.0
-            self._planned_path.append(planned)
-            self._planned_path_pub.publish(planned)
+        pose = PoseStamped()
+        pose.header.stamp = now
+        pose.header.frame_id = 'map'
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.position.z = z
+        self.planned_path.poses.append(pose)
+        self.planned_path.header.stamp = now
+        self.planned_path_pub.publish(self.planned_path)
 
 
 def main():
     rclpy.init()
     node = PdsmcMission()
-
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    except RuntimeError:
-        pass
-
+    rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
 
