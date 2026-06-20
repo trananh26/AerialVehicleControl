@@ -236,6 +236,7 @@ class PdsmcMission(Node):
             if self.current_state and self.current_state.connected:
                 self.get_logger().info('MAVROS connected')
                 self.set_stream_rate(32, 20)
+                self.set_stream_rate(29, 20)
                 self.mission_state = self.SEND_GUIDED
             return
 
@@ -315,9 +316,6 @@ class PdsmcMission(Node):
         # --- CLIMBING ---
         if self.mission_state == self.CLIMBING:
             if self.current_z >= 3.0:
-                if not self._imu_valid:
-                    self.get_logger().warn('IMU not ready — waiting...')
-                    return
                 self.get_logger().info(
                     f'Altitude reached z={self.current_z:.2f}m — settling 1.5s...',
                 )
@@ -328,6 +326,10 @@ class PdsmcMission(Node):
         # --- SETTLING ---
         if self.mission_state == self.SETTLING:
             t_settle = time.time() - self.control_t0
+            if not self._imu_valid:
+                self.get_logger().warn('IMU not ready — waiting...')
+                self.control_t0 = time.time()
+                return
             self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.5)
             if t_settle >= 1.5:
                 self.control_t0 = time.time()
@@ -402,6 +404,7 @@ class PdsmcMission(Node):
 
         # --- WAIT_LAND ---
         if self.mission_state == self.WAIT_LAND:
+            self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.3)
             if not self.pending_future.done():
                 return
             resp = self.pending_future.result()
@@ -415,6 +418,7 @@ class PdsmcMission(Node):
 
         # --- WAIT_DISARM ---
         if self.mission_state == self.WAIT_DISARM:
+            self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.2)
             if self.current_state and not self.current_state.armed:
                 self.get_logger().info('Drone disarmed, mission complete. Saving paths...')
                 self.save_paths_to_csv()
