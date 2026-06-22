@@ -160,6 +160,7 @@ class PdsmcMission(Node):
         self.CLIMB_TIMEOUT_SEC = 30.0
         self.CLIMB_TARGET_Z = 3.0
         self._control_logged = False
+        self._z_ref_override: float | None = None   # set when climb times out
         self._land_start_time: float | None = None
         self.LAND_TIMEOUT_SEC = 60.0
         self.DISARM_TIMEOUT_SEC = 120.0
@@ -379,6 +380,7 @@ class PdsmcMission(Node):
                 self.get_logger().info(
                     f'Altitude reached z={self.current_z:.2f}m — settling 1.5s...',
                 )
+                self._z_ref_override = self.current_z   # use actual altitude as reference
                 self.control_t0 = time.time()
                 self.climb_start_time = None
                 self._climb_last_log = None
@@ -390,6 +392,7 @@ class PdsmcMission(Node):
                 self.get_logger().warn(
                     f'Climb timeout at z={self.current_z:.2f}m after {elapsed:.1f}s — forcing settle',
                 )
+                self._z_ref_override = self.current_z   # use actual altitude as reference
                 self.control_t0 = time.time()
                 self.climb_start_time = None
                 self._climb_last_log = None
@@ -413,10 +416,11 @@ class PdsmcMission(Node):
         if self.mission_state == self.CONTROL:
             t_run = time.time() - self.control_t0
 
-            # One-time entry log
+            z_ref = self._z_ref_override if self._z_ref_override is not None else 3.0
+
             if not self._control_logged:
                 self.get_logger().info(
-                    f'[CONTROL] Started — hovering at z={self._pz:.3f}m for {30.0}s then land',
+                    f'[CONTROL] Started — hovering at z={self._pz:.3f}m (z_ref={z_ref:.3f}m) for {30.0}s then land',
                 )
                 self._control_logged = True
 
@@ -428,7 +432,6 @@ class PdsmcMission(Node):
 
             m = 0.8
             g = 9.81
-            z_ref = 3.0
             ez   = z_ref - self._pz
             ez_d = -self._vz
             kp1, kd1, H1, lam1 = 100.0, 40.0, 160.0, 100.0
@@ -468,7 +471,7 @@ class PdsmcMission(Node):
             # Log Euler angles every loop during CONTROL
             self.euler_log.append((time.time(), self._phi, self._theta, self._psi))
 
-            self.add_planned(0.0, 0.0, 3.0)
+            self.add_planned(0.0, 0.0, z_ref)
 
             dur = 30.0
             if t_run >= dur:
