@@ -131,7 +131,7 @@ class PdsmcMission(Node):
             State, '/mavros/state', self.state_callback, qos,
         )
         self.imu_sub = self.create_subscription(
-            Imu, '/mavros/imu/data', self.imu_callback, qos_reliable,
+            Imu, '/mavros/imu/data', self.imu_callback, qos,
         )
 
         self.current_z = 0.0
@@ -244,19 +244,6 @@ class PdsmcMission(Node):
         thr_msg = Float64()
         thr_msg.data = float(throttle)
         self.pub_thrust.publish(thr_msg)
-
-    def _state_vec(self) -> np.ndarray:
-        return np.array(
-            [
-                self._px, self._vx,
-                self._py, self._vy,
-                self._pz, self._vz,
-                self._phi, self._phid,
-                self._theta, self._thetd,
-                self._psi, self._psid,
-            ],
-            dtype=float,
-        )
 
     # --- state machine ---
     def timer_callback(self):
@@ -414,6 +401,20 @@ class PdsmcMission(Node):
 
         # --- CONTROL: PDSMC hover ---
         if self.mission_state == self.CONTROL:
+            #
+            # IMPORTANT: In GUIDED mode, ArduPilot runs its own GUIDED position controller
+            # which computes attitude setpoints from position error. The setpoint_attitude
+            # topic is intended to override this. However, to guarantee no interference
+            # from FCU's inner loops, the safest approach is to switch to ACRO mode here
+            # (PDSMC takes full authority) and switch back to GUIDED before LAND.
+            #
+            # If you want to try ACRO mode for CONTROL, uncomment the block below and
+            # add an ACRO→GUIDED transition before SEND_LAND. See circle_mission.py for
+            # the GUIDED/SEND_LAND pattern which is proven.
+            #
+            # For now we stay in GUIDED and rely on setpoint_attitude overriding the
+            # GUIDED position controller, consistent with the original MATLAB design.
+            #
             t_run = time.time() - self.control_t0
 
             z_ref = self._z_ref_override if self._z_ref_override is not None else 3.0
@@ -432,12 +433,16 @@ class PdsmcMission(Node):
 
             m = 0.8
             g = 9.81
+            # X500: 4 motors, hover thrust ≈ m*g / (4 motors) = 1.96N per motor
+            # throttle = U1 / (max_thrust), where max_thrust = 2.0 * m * g (T/W ratio ~2)
+            N_MOTORS = 4
+            THRUST_MAX = 2.0 * m * g   # N, max thrust per motor = 1.57 * hover
             ez   = z_ref - self._pz
             ez_d = -self._vz
             kp1, kd1, H1, lam1 = 100.0, 40.0, 160.0, 100.0
             U1_raw = m * g + kp1 * ez + kd1 * ez_d + H1 * math.tanh(ez_d + lam1 * ez)
             U1 = max(0.3 * m * g, U1_raw)
-            throttle = float(np.clip(U1 / (m * 16.0), 0.0, 1.0))
+            throttle = float(np.clip(U1 / THRUST_MAX, 0.0, 1.0))
 
             kpx, kdx, Hx, lamx = 1.5, 1.0, 0.5, 0.5
             kpy, kdy, Hy, lamy = 1.5, 1.0, 0.5, 0.5
@@ -498,9 +503,8 @@ class PdsmcMission(Node):
             if self._land_start_time is None:
                 self._land_start_time = time.time()
 
-            self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.3)
-            if self._imu_valid:
-                self.euler_log.append((time.time(), self._phi, self._theta, self._psi))
+            # NOTE: Do NOT publish attitude here. LAND mode needs full authority from FCU.
+            # Publishing attitude setpoints interferes with ArduPilot's LAND controller.
 
             # Timeout: if LAND mode not accepted after timeout, retry
             land_elapsed = time.time() - self._land_start_time
@@ -532,9 +536,8 @@ class PdsmcMission(Node):
                     f'Waiting for disarm (timeout={self.DISARM_TIMEOUT_SEC:.0f}s)...',
                 )
 
-            self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.2)
-            if self._imu_valid:
-                self.euler_log.append((time.time(), self._phi, self._theta, self._psi))
+            # NOTE: Do NOT publish attitude here. Drone is in LAND mode, FCU handles descent.
+            # Publishing attitude setpoints can interfere with the landing controller.
 
             # Timeout: force finish if disarm takes too long
             disarm_elapsed = time.time() - self._disarm_start_time
