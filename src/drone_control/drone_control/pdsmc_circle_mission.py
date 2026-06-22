@@ -23,6 +23,18 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 
+def quat_to_euler_rpy(qx: float, qy: float, qz: float, qw: float) -> tuple[float, float, float]:
+    sinr_cosp = 2.0 * (qw * qx + qy * qz)
+    cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2.0 * (qw * qy - qz * qx)
+    pitch = math.asin(max(-1.0, min(1.0, sinp)))
+    siny = 2.0 * (qw * qz + qx * qy)
+    cosy = 1.0 - 2.0 * (qy * qy + qz * qz)
+    yaw = math.atan2(siny, cosy)
+    return roll, pitch, yaw
+
+
 class PdsmcCircleMission(Node):
 
     WAIT_CONN     = 0
@@ -30,20 +42,24 @@ class PdsmcCircleMission(Node):
     WAIT_GUIDED   = 2
     SEND_ARM      = 3
     WAIT_ARM      = 4
-    SEND_TAKEOFF  = 5
-    WAIT_TAKEOFF  = 6
-    CLIMBING      = 7
-    FLY_TO_START  = 8
-    CIRCLE        = 9
-    FLY_TO_CENTER = 10
-    SEND_LAND     = 11
-    WAIT_LAND     = 12
-    WAIT_DISARM   = 13
-    DONE          = 14
+    WAIT_STABLE   = 5   # wait for FCU arm confirmed + stabilisation delay (matches circle_mission.py)
+    SEND_TAKEOFF  = 6
+    WAIT_TAKEOFF  = 7
+    CLIMBING      = 8
+    FLY_TO_START  = 9
+    CIRCLE        = 10
+    FLY_TO_CENTER = 11
+    SEND_LAND     = 12
+    WAIT_LAND     = 13
+    WAIT_DISARM   = 14
+    DONE          = 15
 
     def __init__(self):
 
         super().__init__('pdsmc_circle_mission')
+
+        self.declare_parameter('save_log', True)
+        self.save_log = self.get_parameter('save_log').get_parameter_value().bool_value
 
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -86,14 +102,21 @@ class PdsmcCircleMission(Node):
         self._vy = 0.0
         self.current_state: State | None = None
 
+        # Euler angle log (time, roll, pitch, yaw in rad)
+        self.euler_log: list[tuple[float, float, float, float]] = []
+
         # circle parameters
         self.x0: float | None = None
         self.y0: float | None = None
+        self.takeoff_z = 0.0
+        self.target_z = 0.0
         self.radius = 3.0
         self.w = 0.3
 
         # mission timing
         self.start_time: float | None = None
+        self.arm_time: rclpy.time.Time | None = None
+        self.ARM_STABLE_SEC = 2.0
 
         # mission state machine
         self.mission_state = self.WAIT_CONN
@@ -122,6 +145,7 @@ class PdsmcCircleMission(Node):
         self.current_x = msg.pose.position.x
         self.current_y = msg.pose.position.y
         self.current_z = msg.pose.position.z
+
         if self.mission_state >= self.CLIMBING and self.mission_state <= self.WAIT_DISARM:
             pose = PoseStamped()
             pose.header = msg.header
@@ -130,6 +154,13 @@ class PdsmcCircleMission(Node):
             self.actual_path.poses.append(pose)
             self.actual_path.header.stamp = msg.header.stamp
             self.actual_path_pub.publish(self.actual_path)
+
+            # Log Euler angles from local position orientation (EKF estimate)
+            phi, theta, psi = quat_to_euler_rpy(
+                msg.pose.orientation.x, msg.pose.orientation.y,
+                msg.pose.orientation.z, msg.pose.orientation.w,
+            )
+            self.euler_log.append((time.time(), phi, theta, psi))
 
     def state_callback(self, msg: State):
         self.current_state = msg
@@ -157,6 +188,7 @@ class PdsmcCircleMission(Node):
         msg.header.frame_id = 'map'
         msg.twist.linear.x = vx
         msg.twist.linear.y = vy
+        msg.twist.linear.z = 0.0
         self.pub_cmd.publish(msg)
 
     def add_planned(self, x: float, y: float, z: float):
@@ -172,13 +204,16 @@ class PdsmcCircleMission(Node):
         self.planned_path_pub.publish(self.planned_path)
 
     def save_paths_to_csv(self):
+        if not self.save_log:
+            return
         home = os.path.expanduser('~')
         ts = time.strftime('%Y%m%d_%H%M%S')
 
-        planned_file = os.path.join(home, f'planned_path_pdsmc_circle_{ts}.csv')
+        # Planned path CSV — with quaternion (orientation.w=1 by default in add_planned)
+        planned_file = os.path.join(home, f'planned_path_{ts}.csv')
         with open(planned_file, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['time_sec', 'time_nsec', 'x', 'y', 'z'])
+            writer.writerow(['time_sec', 'time_nsec', 'x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'])
             for pose in self.planned_path.poses:
                 writer.writerow([
                     pose.header.stamp.sec,
@@ -186,15 +221,20 @@ class PdsmcCircleMission(Node):
                     pose.pose.position.x,
                     pose.pose.position.y,
                     pose.pose.position.z,
+                    pose.pose.orientation.x,
+                    pose.pose.orientation.y,
+                    pose.pose.orientation.z,
+                    pose.pose.orientation.w,
                 ])
         self.get_logger().info(
             f'Planned path saved: {planned_file} ({len(self.planned_path.poses)} pts)',
         )
 
-        actual_file = os.path.join(home, f'actual_path_pdsmc_circle_{ts}.csv')
+        # Actual path CSV — with quaternion from local position
+        actual_file = os.path.join(home, f'actual_path_{ts}.csv')
         with open(actual_file, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['time_sec', 'time_nsec', 'x', 'y', 'z'])
+            writer.writerow(['time_sec', 'time_nsec', 'x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'])
             for pose in self.actual_path.poses:
                 writer.writerow([
                     pose.header.stamp.sec,
@@ -202,10 +242,31 @@ class PdsmcCircleMission(Node):
                     pose.pose.position.x,
                     pose.pose.position.y,
                     pose.pose.position.z,
+                    pose.pose.orientation.x,
+                    pose.pose.orientation.y,
+                    pose.pose.orientation.z,
+                    pose.pose.orientation.w,
                 ])
         self.get_logger().info(
             f'Actual path saved: {actual_file} ({len(self.actual_path.poses)} pts)',
         )
+
+        # Euler angle log CSV
+        if self.euler_log:
+            euler_file = os.path.join(home, f'euler_log_pdsmc_circle_{ts}.csv')
+            with open(euler_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['time_sec', 'roll_rad', 'pitch_rad', 'yaw_rad',
+                                'roll_deg', 'pitch_deg', 'yaw_deg'])
+                for t, roll, pitch, yaw in self.euler_log:
+                    writer.writerow([t,
+                                    roll, pitch, yaw,
+                                    math.degrees(roll), math.degrees(pitch), math.degrees(yaw)])
+            self.get_logger().info(
+                f'Euler log saved: {euler_file} ({len(self.euler_log)} pts)',
+            )
+        else:
+            self.get_logger().warn('No Euler data to save')
 
     # --- state machine ---
     def timer_callback(self):
@@ -255,11 +316,26 @@ class PdsmcCircleMission(Node):
                 return
             resp = self.pending_future.result()
             if resp and resp.success:
-                self.get_logger().info('Arming accepted')
-                self.mission_state = self.SEND_TAKEOFF
+                self.get_logger().info('Arming accepted, waiting for FCU arm confirmation + stabilisation...')
+                self.arm_time = None
+                self.mission_state = self.WAIT_STABLE
             else:
                 self.get_logger().warn('Arming rejected, retrying...')
                 self.mission_state = self.SEND_ARM
+            return
+
+        # --- WAIT_STABLE: wait until FCU confirms armed AND stabilisation delay passes ---
+        if self.mission_state == self.WAIT_STABLE:
+            if self.current_state and self.current_state.armed:
+                if self.arm_time is None:
+                    self.arm_time = self.get_clock().now()
+                    self.get_logger().info(f'FCU armed confirmed, stabilising for {self.ARM_STABLE_SEC:.1f}s...')
+                elapsed = (self.get_clock().now() - self.arm_time).nanoseconds / 1e9
+                if elapsed >= self.ARM_STABLE_SEC:
+                    self.get_logger().info('Stabilisation done, proceeding to takeoff')
+                    self.mission_state = self.SEND_TAKEOFF
+            else:
+                self.arm_time = None
             return
 
         # --- SEND_TAKEOFF ---
@@ -284,8 +360,10 @@ class PdsmcCircleMission(Node):
                 return
             resp = self.pending_future.result()
             if resp and resp.success:
-                self.get_logger().info('Takeoff accepted, climbing to 3.0m...')
-                self.add_planned(self.current_x, self.current_y, 3.0)
+                self.takeoff_z = self.current_z
+                self.target_z = self.takeoff_z + 3.0
+                self.get_logger().info(f'Takeoff accepted, climbing to {self.target_z:.1f}m...')
+                self.add_planned(self.current_x, self.current_y, self.target_z)
                 self.mission_state = self.CLIMBING
             else:
                 self.get_logger().warn('Takeoff rejected, retrying...')
@@ -294,7 +372,7 @@ class PdsmcCircleMission(Node):
 
         # --- CLIMBING ---
         if self.mission_state == self.CLIMBING:
-            if self.current_z >= 3.0:
+            if self.current_z >= self.target_z:
                 self.x0 = self.current_x
                 self.y0 = self.current_y
                 self.get_logger().info(
@@ -316,7 +394,7 @@ class PdsmcCircleMission(Node):
                 self.start_time = time.time()
                 self.get_logger().info('Reached circle start, beginning circle')
                 self._stop_pub()
-                self.add_planned(tx, ty, 3.0)
+                self.add_planned(tx, ty, self.target_z)
                 self.mission_state = self.CIRCLE
                 return
 
@@ -333,11 +411,12 @@ class PdsmcCircleMission(Node):
                 self._stop_pub()
 
                 # planned landing trajectory: descend stepwise to ground
-                for z in [3.0 - i * 0.1 for i in range(int(3.0 / 0.1))]:
+                steps = int(self.target_z / 0.1)
+                for z in [self.target_z - i * 0.1 for i in range(steps)]:
                     self.add_planned(self.x0, self.y0, z)
 
                 self.get_logger().info('Circle completed, flying back to center...')
-                self.add_planned(self.x0, self.y0, 3.0)
+                self.add_planned(self.x0, self.y0, self.target_z)
                 self.mission_state = self.FLY_TO_CENTER
                 return
 
@@ -345,7 +424,7 @@ class PdsmcCircleMission(Node):
             xd = self.x0 + self.radius * math.cos(angle)
             yd = self.y0 + self.radius * math.sin(angle)
             xd_d = -self.radius * self.w * math.sin(angle)
-            yd_d =  self.radius * self.w * math.cos(angle)
+            yd_d = self.radius * self.w * math.cos(angle)
 
             # PDSMC-like position/velocity feedback → velocity correction in m/s
             kpx, kdx, Hx, lamx = 0.5, 0.3, 0.1, 0.5
@@ -364,7 +443,7 @@ class PdsmcCircleMission(Node):
             vy_cmd = yd_d + dvy
 
             self._pub_vel(vx_cmd, vy_cmd)
-            self.add_planned(xd, yd, 3.0)
+            self.add_planned(xd, yd, self.target_z)
             return
 
         # --- FLY_TO_CENTER ---

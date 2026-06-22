@@ -68,24 +68,28 @@ def euler_to_quat(roll: float, pitch: float, yaw: float) -> Quaternion:
 
 class PdsmcMission(Node):
 
-    WAIT_CONN  = 0
+    WAIT_CONN   = 0
     SEND_GUIDED = 1
     WAIT_GUIDED = 2
     SEND_ARM    = 3
     WAIT_ARM    = 4
-    SEND_TAKEOFF = 5
-    WAIT_TAKEOFF = 6
-    CLIMBING    = 7
-    SETTLING    = 8
-    CONTROL     = 9
-    SEND_LAND   = 10
-    WAIT_LAND   = 11
-    WAIT_DISARM = 12
-    DONE        = 13
+    WAIT_STABLE = 5   # wait for FCU arm confirmed + stabilisation delay (matches circle_mission.py)
+    SEND_TAKEOFF = 6
+    WAIT_TAKEOFF = 7
+    CLIMBING    = 8
+    SETTLING    = 9
+    CONTROL     = 10
+    SEND_LAND   = 11
+    WAIT_LAND   = 12
+    WAIT_DISARM = 13
+    DONE        = 14
 
     def __init__(self):
 
         super().__init__('pdsmc_mission')
+
+        self.declare_parameter('save_log', True)
+        self.save_log = self.get_parameter('save_log').get_parameter_value().bool_value
 
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -145,6 +149,11 @@ class PdsmcMission(Node):
         self.mission_state = self.WAIT_CONN
         self.pending_future: rclpy.task.Future | None = None
         self.control_t0: float | None = None
+        self.arm_time: rclpy.time.Time | None = None
+        self.ARM_STABLE_SEC = 2.0
+
+        # Euler angle log (time, roll, pitch, yaw in rad)
+        self.euler_log: list[tuple[float, float, float, float]] = []
 
         self.set_mode_client = self.create_client(SetMode, '/mavros/set_mode')
         self.arming_client = self.create_client(CommandBool, '/mavros/cmd/arming')
@@ -277,11 +286,26 @@ class PdsmcMission(Node):
                 return
             resp = self.pending_future.result()
             if resp and resp.success:
-                self.get_logger().info('Arming accepted')
-                self.mission_state = self.SEND_TAKEOFF
+                self.get_logger().info('Arming accepted, waiting for FCU arm confirmation + stabilisation...')
+                self.arm_time = None
+                self.mission_state = self.WAIT_STABLE
             else:
                 self.get_logger().warn('Arming rejected, retrying...')
                 self.mission_state = self.SEND_ARM
+            return
+
+        # --- WAIT_STABLE: wait until FCU confirms armed AND stabilisation delay passes ---
+        if self.mission_state == self.WAIT_STABLE:
+            if self.current_state and self.current_state.armed:
+                if self.arm_time is None:
+                    self.arm_time = self.get_clock().now()
+                    self.get_logger().info(f'FCU armed confirmed, stabilising for {self.ARM_STABLE_SEC:.1f}s...')
+                elapsed = (self.get_clock().now() - self.arm_time).nanoseconds / 1e9
+                if elapsed >= self.ARM_STABLE_SEC:
+                    self.get_logger().info('Stabilisation done, proceeding to takeoff')
+                    self.mission_state = self.SEND_TAKEOFF
+            else:
+                self.arm_time = None
             return
 
         # --- SEND_TAKEOFF ---
@@ -331,6 +355,7 @@ class PdsmcMission(Node):
                 self.control_t0 = time.time()
                 return
             self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.5)
+            self.euler_log.append((time.time(), self._phi, self._theta, self._psi))
             if t_settle >= 1.5:
                 self.control_t0 = time.time()
                 self.get_logger().info(
@@ -382,6 +407,9 @@ class PdsmcMission(Node):
                     f'U1={U1:.2f}N thr={throttle:.3f}',
                 )
 
+            # Log Euler angles every loop during CONTROL
+            self.euler_log.append((time.time(), self._phi, self._theta, self._psi))
+
             self.add_planned(0.0, 0.0, 3.0)
 
             dur = 30.0
@@ -405,6 +433,8 @@ class PdsmcMission(Node):
         # --- WAIT_LAND ---
         if self.mission_state == self.WAIT_LAND:
             self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.3)
+            if self._imu_valid:
+                self.euler_log.append((time.time(), self._phi, self._theta, self._psi))
             if not self.pending_future.done():
                 return
             resp = self.pending_future.result()
@@ -419,32 +449,74 @@ class PdsmcMission(Node):
         # --- WAIT_DISARM ---
         if self.mission_state == self.WAIT_DISARM:
             self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.2)
+            if self._imu_valid:
+                self.euler_log.append((time.time(), self._phi, self._theta, self._psi))
             if self.current_state and not self.current_state.armed:
-                self.get_logger().info('Drone disarmed, mission complete. Saving paths...')
-                self.save_paths_to_csv()
+                self.get_logger().info('Drone disarmed, mission complete.')
+                if self.save_log:
+                    self.get_logger().info('Saving paths...')
+                    self.save_paths_to_csv()
                 self.mission_state = self.DONE
             return
 
     def save_paths_to_csv(self):
+        if not self.save_log:
+            return
         home = os.path.expanduser('~')
         ts = time.strftime('%Y%m%d_%H%M%S')
+
+        # Planned path CSV — with quaternion (orientation.w=1, others=0 by default)
         planned_file = os.path.join(home, f'pdsmc_planned_{ts}.csv')
         with open(planned_file, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['time_sec', 'x', 'y', 'z'])
+            writer.writerow(['time_sec', 'time_nsec', 'x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'])
             for pose in self.planned_path.poses:
-                t = float(pose.header.stamp.sec) + float(pose.header.stamp.nanosec) * 1e-9
-                writer.writerow([t, pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
+                writer.writerow([
+                    pose.header.stamp.sec,
+                    pose.header.stamp.nanosec,
+                    pose.pose.position.x,
+                    pose.pose.position.y,
+                    pose.pose.position.z,
+                    pose.pose.orientation.x,
+                    pose.pose.orientation.y,
+                    pose.pose.orientation.z,
+                    pose.pose.orientation.w,
+                ])
         self.get_logger().info(f'Planned path saved: {planned_file} ({len(self.planned_path.poses)} points)')
 
+        # Actual path CSV — with quaternion from local position
         actual_file = os.path.join(home, f'pdsmc_actual_{ts}.csv')
         with open(actual_file, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['time_sec', 'x', 'y', 'z'])
+            writer.writerow(['time_sec', 'time_nsec', 'x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'])
             for pose in self.actual_path.poses:
-                t = float(pose.header.stamp.sec) + float(pose.header.stamp.nanosec) * 1e-9
-                writer.writerow([t, pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
+                writer.writerow([
+                    pose.header.stamp.sec,
+                    pose.header.stamp.nanosec,
+                    pose.pose.position.x,
+                    pose.pose.position.y,
+                    pose.pose.position.z,
+                    pose.pose.orientation.x,
+                    pose.pose.orientation.y,
+                    pose.pose.orientation.z,
+                    pose.pose.orientation.w,
+                ])
         self.get_logger().info(f'Actual path saved: {actual_file} ({len(self.actual_path.poses)} points)')
+
+        # Euler angle log CSV
+        if self.euler_log:
+            euler_file = os.path.join(home, f'pdsmc_euler_{ts}.csv')
+            with open(euler_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['time_sec', 'roll_rad', 'pitch_rad', 'yaw_rad',
+                                'roll_deg', 'pitch_deg', 'yaw_deg'])
+                for t, roll, pitch, yaw in self.euler_log:
+                    writer.writerow([t,
+                                    roll, pitch, yaw,
+                                    math.degrees(roll), math.degrees(pitch), math.degrees(yaw)])
+            self.get_logger().info(f'Euler log saved: {euler_file} ({len(self.euler_log)} points)')
+        else:
+            self.get_logger().warn('No Euler data to save')
 
     def add_planned(self, x: float, y: float, z: float):
         now = self.get_clock().now().to_msg()
@@ -454,6 +526,7 @@ class PdsmcMission(Node):
         pose.pose.position.x = x
         pose.pose.position.y = y
         pose.pose.position.z = z
+        pose.pose.orientation.w = 1.0
         self.planned_path.poses.append(pose)
         self.planned_path.header.stamp = now
         self.planned_path_pub.publish(self.planned_path)
