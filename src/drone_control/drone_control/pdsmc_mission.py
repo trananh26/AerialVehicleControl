@@ -96,6 +96,11 @@ class PdsmcMission(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
+        qos_reliable = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
 
         self.pub_attitude = self.create_publisher(
             PoseStamped, '/mavros/setpoint_attitude/attitude', qos,
@@ -126,7 +131,7 @@ class PdsmcMission(Node):
             State, '/mavros/state', self.state_callback, qos,
         )
         self.imu_sub = self.create_subscription(
-            Imu, '/mavros/imu/data', self.imu_callback, qos,
+            Imu, '/mavros/imu/data', self.imu_callback, qos_reliable,
         )
 
         self.current_z = 0.0
@@ -141,6 +146,7 @@ class PdsmcMission(Node):
         self._phi = 0.0
         self._theta = 0.0
         self._psi = 0.0
+        self._psi_from_pose = False
         self._phid = 0.0
         self._thetd = 0.0
         self._psid = 0.0
@@ -151,6 +157,15 @@ class PdsmcMission(Node):
         self.control_t0: float | None = None
         self.arm_time: rclpy.time.Time | None = None
         self.ARM_STABLE_SEC = 2.0
+        self.CLIMB_TIMEOUT_SEC = 30.0
+        self.CLIMB_TARGET_Z = 3.0
+        self._control_logged = False
+        self._land_start_time: float | None = None
+        self.LAND_TIMEOUT_SEC = 60.0
+        self.DISARM_TIMEOUT_SEC = 120.0
+        self._disarm_start_time: float | None = None
+        self.climb_start_time: float | None = None
+        self._climb_last_log: float | None = None
 
         # Euler angle log (time, roll, pitch, yaw in rad)
         self.euler_log: list[tuple[float, float, float, float]] = []
@@ -176,6 +191,10 @@ class PdsmcMission(Node):
         self._py = msg.pose.position.y
         self._pz = msg.pose.position.z
         self.current_z = msg.pose.position.z
+        # Always extract yaw from pose orientation (works even if IMU stream is down)
+        phi, theta, psi = quat_to_euler_rpy(msg.pose.orientation)
+        self._psi = psi
+        self._psi_from_pose = True
         if self.mission_state >= self.CLIMBING and self.mission_state <= self.WAIT_DISARM:
             pose = PoseStamped()
             pose.header = msg.header
@@ -195,6 +214,7 @@ class PdsmcMission(Node):
 
     def imu_callback(self, msg: Imu):
         self._imu_valid = True
+        self._psi_from_pose = False   # IMU takes precedence
         self._phi, self._theta, self._psi = quat_to_euler_rpy(msg.orientation)
         p = msg.angular_velocity.x
         q = msg.angular_velocity.y
@@ -244,8 +264,8 @@ class PdsmcMission(Node):
         if self.mission_state == self.WAIT_CONN:
             if self.current_state and self.current_state.connected:
                 self.get_logger().info('MAVROS connected')
-                self.set_stream_rate(32, 20)
-                self.set_stream_rate(29, 20)
+                self.set_stream_rate(32, 20)   # LOCAL_POSITION_NED
+                self.set_stream_rate(29, 20)   # RAW_IMU (attitude, gyro, accel)
                 self.mission_state = self.SEND_GUIDED
             return
 
@@ -339,25 +359,50 @@ class PdsmcMission(Node):
 
         # --- CLIMBING ---
         if self.mission_state == self.CLIMBING:
-            if self.current_z >= 3.0:
+            if self.climb_start_time is None:
+                self.climb_start_time = time.time()
+                self._climb_last_log = None
+
+            now = time.time()
+            elapsed = now - self.climb_start_time
+
+            # Log altitude every 2s so we can see current_z in terminal
+            if self._climb_last_log is None or (now - self._climb_last_log) >= 2.0:
+                self.get_logger().info(f'Climbing... z={self.current_z:.3f}m (t+{elapsed:.1f}s)')
+                self._climb_last_log = now
+
+            # NOTE: Do NOT publish attitude here. GUIDED mode handles takeoff autonomously.
+            # Publishing attitude setpoints can interfere with PX4's altitude hold.
+
+            # Use margin to handle EKF drift (target 2.8m so we always pass)
+            if self.current_z >= self.CLIMB_TARGET_Z - 0.2:
                 self.get_logger().info(
                     f'Altitude reached z={self.current_z:.2f}m — settling 1.5s...',
                 )
                 self.control_t0 = time.time()
+                self.climb_start_time = None
+                self._climb_last_log = None
+                self.mission_state = self.SETTLING
+                return
+
+            # Timeout protection: if still climbing after timeout, proceed anyway
+            if elapsed >= self.CLIMB_TIMEOUT_SEC:
+                self.get_logger().warn(
+                    f'Climb timeout at z={self.current_z:.2f}m after {elapsed:.1f}s — forcing settle',
+                )
+                self.control_t0 = time.time()
+                self.climb_start_time = None
+                self._climb_last_log = None
                 self.mission_state = self.SETTLING
             return
 
         # --- SETTLING ---
         if self.mission_state == self.SETTLING:
             t_settle = time.time() - self.control_t0
-            if not self._imu_valid:
-                self.get_logger().warn('IMU not ready — waiting...')
-                self.control_t0 = time.time()
-                return
-            self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.5)
-            self.euler_log.append((time.time(), self._phi, self._theta, self._psi))
+            # NOTE: Do NOT publish attitude here. Let GUIDED mode hold position/altitude.
             if t_settle >= 1.5:
                 self.control_t0 = time.time()
+                self._control_logged = False
                 self.get_logger().info(
                     f'Settling done — entering PDSMC CONTROL at z={self.current_z:.2f}m',
                 )
@@ -368,6 +413,19 @@ class PdsmcMission(Node):
         if self.mission_state == self.CONTROL:
             t_run = time.time() - self.control_t0
 
+            # One-time entry log
+            if not self._control_logged:
+                self.get_logger().info(
+                    f'[CONTROL] Started — hovering at z={self._pz:.3f}m for {30.0}s then land',
+                )
+                self._control_logged = True
+
+            # Periodic visibility log every 5s
+            if int(t_run) % 5 == 0 and abs(t_run - int(t_run)) < 0.1:
+                self.get_logger().info(
+                    f'[CONTROL] t={t_run:.1f}s | z={self._pz:.3f}m | yaw={math.degrees(self._psi):.1f}deg',
+                )
+
             m = 0.8
             g = 9.81
             z_ref = 3.0
@@ -376,7 +434,7 @@ class PdsmcMission(Node):
             kp1, kd1, H1, lam1 = 100.0, 40.0, 160.0, 100.0
             U1_raw = m * g + kp1 * ez + kd1 * ez_d + H1 * math.tanh(ez_d + lam1 * ez)
             U1 = max(0.3 * m * g, U1_raw)
-            throttle = float(np.clip(U1 / (m * 15.0), 0.0, 1.0))
+            throttle = float(np.clip(U1 / (m * 16.0), 0.0, 1.0))
 
             kpx, kdx, Hx, lamx = 1.5, 1.0, 0.5, 0.5
             kpy, kdy, Hy, lamy = 1.5, 1.0, 0.5, 0.5
@@ -426,38 +484,74 @@ class PdsmcMission(Node):
             req = SetMode.Request()
             req.custom_mode = 'LAND'
             self.pending_future = self.set_mode_client.call_async(req)
+            self._land_start_time = None   # reset timeout tracker
             self.get_logger().info('Sending LAND command...')
             self.mission_state = self.WAIT_LAND
             return
 
         # --- WAIT_LAND ---
         if self.mission_state == self.WAIT_LAND:
+            # Track time for LAND mode timeout
+            if self._land_start_time is None:
+                self._land_start_time = time.time()
+
             self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.3)
             if self._imu_valid:
                 self.euler_log.append((time.time(), self._phi, self._theta, self._psi))
+
+            # Timeout: if LAND mode not accepted after timeout, retry
+            land_elapsed = time.time() - self._land_start_time
+            if land_elapsed >= self.LAND_TIMEOUT_SEC:
+                self.get_logger().warn(f'LAND timeout after {land_elapsed:.1f}s — retrying...')
+                self._land_start_time = None
+                self.mission_state = self.SEND_LAND
+                return
+
             if not self.pending_future.done():
                 return
             resp = self.pending_future.result()
             if resp and resp.mode_sent:
                 self.get_logger().info('LAND mode accepted, waiting for drone to land...')
+                self._land_start_time = None
                 self.mission_state = self.WAIT_DISARM
             else:
                 self.get_logger().warn('LAND mode rejected, retrying...')
+                self._land_start_time = None
                 self.mission_state = self.SEND_LAND
             return
 
         # --- WAIT_DISARM ---
         if self.mission_state == self.WAIT_DISARM:
+            # Track time for disarm timeout
+            if self._disarm_start_time is None:
+                self._disarm_start_time = time.time()
+                self.get_logger().info(
+                    f'Waiting for disarm (timeout={self.DISARM_TIMEOUT_SEC:.0f}s)...',
+                )
+
             self._publish_attitude(roll=0.0, pitch=0.0, yaw=self._psi, throttle=0.2)
             if self._imu_valid:
                 self.euler_log.append((time.time(), self._phi, self._theta, self._psi))
+
+            # Timeout: force finish if disarm takes too long
+            disarm_elapsed = time.time() - self._disarm_start_time
+            if disarm_elapsed >= self.DISARM_TIMEOUT_SEC:
+                self.get_logger().warn(
+                    f'Disarm timeout after {disarm_elapsed:.1f}s — finishing mission anyway',
+                )
+                self._finish_mission()
+                return
+
             if self.current_state and not self.current_state.armed:
                 self.get_logger().info('Drone disarmed, mission complete.')
-                if self.save_log:
-                    self.get_logger().info('Saving paths...')
-                    self.save_paths_to_csv()
-                self.mission_state = self.DONE
+                self._finish_mission()
             return
+
+    def _finish_mission(self):
+        if self.save_log:
+            self.get_logger().info('Saving paths...')
+            self.save_paths_to_csv()
+        self.mission_state = self.DONE
 
     def save_paths_to_csv(self):
         if not self.save_log:
