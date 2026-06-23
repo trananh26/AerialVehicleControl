@@ -145,6 +145,8 @@ class PdsmcMission(Node):
         self._vz = 0.0
         self._phi = 0.0
         self._theta = 0.0
+        self._pos_ts = None       # timestamp for finite-difference velocity
+        self._vel_from_topic = False  # True once velocity_local topic is received
         self._psi = 0.0
         self._psi_from_pose = False
         self._phid = 0.0
@@ -191,9 +193,22 @@ class PdsmcMission(Node):
 
     # --- callbacks ---
     def local_pos_callback(self, msg: PoseStamped):
-        self._px = msg.pose.position.x
-        self._py = msg.pose.position.y
-        self._pz = msg.pose.position.z
+        px_new = msg.pose.position.x
+        py_new = msg.pose.position.y
+        pz_new = msg.pose.position.z
+        now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+        if not self._vel_from_topic and self._pos_ts is not None:
+            dt = now - self._pos_ts
+            if dt > 0.001:
+                self._vx = (px_new - self._px) / dt
+                self._vy = (py_new - self._py) / dt
+                self._vz = (pz_new - self._pz) / dt
+
+        self._px = px_new
+        self._py = py_new
+        self._pz = pz_new
+        self._pos_ts = now
         self.current_z = msg.pose.position.z
         # Always extract yaw from pose orientation (works even if IMU stream is down)
         phi, theta, psi = quat_to_euler_rpy(msg.pose.orientation)
@@ -212,6 +227,7 @@ class PdsmcMission(Node):
         self._vx = msg.twist.linear.x
         self._vy = msg.twist.linear.y
         self._vz = msg.twist.linear.z
+        self._vel_from_topic = True
 
     def state_callback(self, msg: State):
         self.current_state = msg
