@@ -23,7 +23,6 @@ from mavros_msgs.srv import SetMode, CommandBool, CommandLong
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Float64
 
 
 def quat_to_euler_rpy(q: Quaternion) -> tuple[float, float, float]:
@@ -49,21 +48,6 @@ def body_rates_from_euler_rates(
     q = cp * theta_d + sp * psi_d
     r = -sp * theta_d + cp * psi_d
     return p, q, r
-
-
-def euler_to_quat(roll: float, pitch: float, yaw: float) -> Quaternion:
-    cy = math.cos(yaw * 0.5)
-    sy = math.sin(yaw * 0.5)
-    cp = math.cos(pitch * 0.5)
-    sp = math.sin(pitch * 0.5)
-    cr = math.cos(roll * 0.5)
-    sr = math.sin(roll * 0.5)
-    q = Quaternion()
-    q.w = cr * cp * cy + sr * sp * sy
-    q.x = sr * cp * cy - cr * sp * sy
-    q.y = cr * sp * cy + sr * cp * sy
-    q.z = cr * cp * sy - sr * sp * cy
-    return q
 
 
 class PdsmcMission(Node):
@@ -102,11 +86,8 @@ class PdsmcMission(Node):
             depth=10,
         )
 
-        self.pub_attitude = self.create_publisher(
-            PoseStamped, '/mavros/setpoint_attitude/attitude', qos,
-        )
-        self.pub_thrust = self.create_publisher(
-            Float64, '/mavros/setpoint_attitude/accel_thrust_throttle', qos,
+        self.pub_velocity = self.create_publisher(
+            TwistStamped, '/mavros/setpoint_velocity/cmd_vel', qos,
         )
         self.planned_path_pub = self.create_publisher(Path, '/planned_path', 10)
         self.actual_path_pub = self.create_publisher(Path, '/actual_path', 10)
@@ -253,16 +234,18 @@ class PdsmcMission(Node):
         req.param2 = float(1_000_000 // max(rate, 1))
         self.takeoff_client.call_async(req)
 
-    def _publish_attitude(self, roll: float, pitch: float, yaw: float, throttle: float):
+    def _publish_velocity(self, vx: float, vy: float, vz: float, yaw_rate: float = 0.0):
         now = self.get_clock().now().to_msg()
-        att_msg = PoseStamped()
-        att_msg.header.stamp = now
-        att_msg.header.frame_id = 'map'
-        att_msg.pose.orientation = euler_to_quat(roll, pitch, yaw)
-        self.pub_attitude.publish(att_msg)
-        thr_msg = Float64()
-        thr_msg.data = float(throttle)
-        self.pub_thrust.publish(thr_msg)
+        msg = TwistStamped()
+        msg.header.stamp = now
+        msg.header.frame_id = 'map'
+        msg.twist.linear.x = float(vx)
+        msg.twist.linear.y = float(vy)
+        msg.twist.linear.z = float(vz)
+        msg.twist.angular.x = 0.0
+        msg.twist.angular.y = 0.0
+        msg.twist.angular.z = float(yaw_rate)
+        self.pub_velocity.publish(msg)
 
     # --- state machine ---
     def timer_callback(self):
@@ -469,18 +452,15 @@ class PdsmcMission(Node):
                     f'[CONTROL] t={t_run:.1f}s | z={self._pz:.3f}m | yaw={math.degrees(self._psi):.1f}deg',
                 )
 
+            # PDMC controller: computes control inputs U1 (thrust), Ux, Uy (horizontal).
+            # Ux/Uy are sent as velocity commands (m/s) — clipped to safe limits.
+            # Vz uses negative sign convention: positive vz → drone descends.
             m = 0.8
             g = 9.81
-            # X500: 4 motors, hover thrust ≈ m*g / (4 motors) = 1.96N per motor
-            # throttle = U1 / (max_thrust), where max_thrust = 2.0 * m * g (T/W ratio ~2)
-            N_MOTORS = 4
-            THRUST_MAX = 2.0 * m * g   # N, max thrust per motor = 1.57 * hover
             ez   = z_ref - self._pz
             ez_d = -self._vz
             kp1, kd1, H1, lam1 = 100.0, 40.0, 160.0, 100.0
-            U1_raw = m * g + kp1 * ez + kd1 * ez_d + H1 * math.tanh(ez_d + lam1 * ez)
-            U1 = max(0.3 * m * g, U1_raw)
-            throttle = float(np.clip(U1 / THRUST_MAX, 0.0, 1.0))
+            U1 = m * g + kp1 * ez + kd1 * ez_d + H1 * math.tanh(ez_d + lam1 * ez)
 
             kpx, kdx, Hx, lamx = 1.5, 1.0, 0.5, 0.5
             kpy, kdy, Hy, lamy = 1.5, 1.0, 0.5, 0.5
@@ -491,24 +471,20 @@ class PdsmcMission(Node):
             Ux = kpx * ex + kdx * ex_d + Hx * math.tanh(ex_d + lamx * ex)
             Uy = kpy * ey + kdy * ey_d + Hy * math.tanh(ey_d + lamy * ey)
 
-            T_norm = max(U1 / m, 1e-6)
-            sinphi = (Ux * math.sin(self._psi) - Uy * math.cos(self._psi)) / T_norm
-            phides = math.asin(float(np.clip(sinphi, -1.0, 1.0)))
-            sintheta = (Ux * math.cos(self._psi) + Uy * math.sin(self._psi)) / (
-                T_norm * max(math.cos(phides), 1e-6)
-            )
-            thetades = math.asin(float(np.clip(sintheta, -1.0, 1.0)))
+            # PDMC outputs are clipped to safe velocity limits for MAVROS.
+            # Frame: NED → vx=N(+), vy=E(+), vz=DOWN(-)=climb
+            MAX_VEL = 2.0
+            vx_cmd = float(np.clip(Ux, -MAX_VEL, MAX_VEL))
+            vy_cmd = float(np.clip(Uy, -MAX_VEL, MAX_VEL))
+            vz_cmd = float(np.clip(U1 / m - g, -MAX_VEL, MAX_VEL))  # thrust→accel→vz
 
-            self._publish_attitude(
-                roll=phides, pitch=thetades, yaw=self._psi, throttle=throttle,
-            )
+            self._publish_velocity(vx_cmd, vy_cmd, vz_cmd, yaw_rate=0.0)
 
             if int(t_run) % 5 == 0 and abs(t_run - int(t_run)) < 0.1:
                 self.get_logger().info(
                     f't={t_run:.1f}s | pos=({self._px:.2f},{self._py:.2f},{self._pz:.2f}) '
-                    f'| phi={math.degrees(self._phi):.1f}deg the={math.degrees(self._theta):.1f}deg '
-                    f'| phides={math.degrees(phides):.2f}deg thdes={math.degrees(thetades):.2f}deg '
-                    f'U1={U1:.2f}N thr={throttle:.3f}',
+                    f'| vx={vx_cmd:.2f}m/s vy={vy_cmd:.2f}m/s vz={vz_cmd:.2f}m/s '
+                    f'U1={U1:.2f}N',
                 )
 
             # Log Euler angles every loop during CONTROL
