@@ -157,6 +157,9 @@ class PdsmcMission(Node):
         self.control_t0: float | None = None
         self.arm_time: rclpy.time.Time | None = None
         self.ARM_STABLE_SEC = 2.0
+        self.ARM_RETRY_TIMEOUT_SEC = 30.0
+        self._arm_retry_start_time: float | None = None
+        self._stable_start_time: float | None = None
         self.CLIMB_TIMEOUT_SEC = 30.0
         self.CLIMB_TARGET_Z = 3.0
         self._control_logged = False
@@ -285,17 +288,26 @@ class PdsmcMission(Node):
             req.value = True
             self.pending_future = self.arming_client.call_async(req)
             self.get_logger().info('Arming vehicle...')
+            self._arm_retry_start_time = None
+            self._stable_start_time = None
             self.mission_state = self.WAIT_ARM
             return
 
         # --- WAIT_ARM ---
         if self.mission_state == self.WAIT_ARM:
+            if self._arm_retry_start_time is None:
+                self._arm_retry_start_time = time.time()
+            if (time.time() - self._arm_retry_start_time) >= self.ARM_RETRY_TIMEOUT_SEC:
+                self.get_logger().error(f'Arming rejected for {self.ARM_RETRY_TIMEOUT_SEC:.0f}s — giving up')
+                self.mission_state = self.DONE
+                return
             if not self.pending_future.done():
                 return
             resp = self.pending_future.result()
             if resp and resp.success:
                 self.get_logger().info('Arming accepted, waiting for FCU arm confirmation + stabilisation...')
                 self.arm_time = None
+                self._arm_retry_start_time = None
                 self.mission_state = self.WAIT_STABLE
             else:
                 self.get_logger().warn('Arming rejected, retrying...')
@@ -303,7 +315,16 @@ class PdsmcMission(Node):
             return
 
         # --- WAIT_STABLE: wait until FCU confirms armed AND stabilisation delay passes ---
+        STABLE_TIMEOUT_SEC = 20.0
         if self.mission_state == self.WAIT_STABLE:
+            if self._stable_start_time is None:
+                self._stable_start_time = time.time()
+            if (time.time() - self._stable_start_time) >= STABLE_TIMEOUT_SEC:
+                self.get_logger().warn(f'WAIT_STABLE timeout after {STABLE_TIMEOUT_SEC:.0f}s — forcing takeoff')
+                self.control_t0 = time.time()
+                self._control_logged = False
+                self.mission_state = self.SETTLING
+                return
             if self.current_state and self.current_state.armed:
                 if self.arm_time is None:
                     self.arm_time = self.get_clock().now()
