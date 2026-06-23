@@ -256,7 +256,8 @@ class PdsmcMission(Node):
             if self.current_state and self.current_state.connected:
                 self.get_logger().info('MAVROS connected')
                 self.set_stream_rate(32, 20)   # LOCAL_POSITION_NED
-                self.set_stream_rate(29, 20)   # RAW_IMU (attitude, gyro, accel)
+                self.set_stream_rate(33, 20)   # LOCAL_VELOCITY_NED
+                self.set_stream_rate(29, 20)   # RAW_IMU
                 self.mission_state = self.SEND_GUIDED
             return
 
