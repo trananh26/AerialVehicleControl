@@ -77,7 +77,7 @@ class CircleMission(Node):
         self.current_state = None
 
         # circle parameters
-        self.radius = 5.0
+        self.radius = 3.0
         self.w = 0.3
 
         # circle center
@@ -262,7 +262,7 @@ class CircleMission(Node):
             req.param4 = float('nan')
             req.param5 = 0.0
             req.param6 = 0.0
-            req.param7 = 5.0
+            req.param7 = 3.0
             self.pending_future = self.takeoff_client.call_async(req)
             self.get_logger().info("Sending takeoff command...")
             self.mission_state = self.WAIT_TAKEOFF
@@ -275,7 +275,7 @@ class CircleMission(Node):
             resp = self.pending_future.result()
             if resp and resp.success:
                 self.takeoff_z = self.current_z
-                self.target_z = self.takeoff_z + 5.0
+                self.target_z = self.takeoff_z + 3.0
                 self.get_logger().info(f"Takeoff accepted, climbing to {self.target_z:.1f}m...")
                 self.add_planned(self.current_x, self.current_y, self.target_z)
                 self.mission_state = self.CLIMBING
