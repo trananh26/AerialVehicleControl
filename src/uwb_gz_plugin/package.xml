@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<?xml-model
+  href="http://download.ros.org/schema/package_format3.xsd"
+  schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>uwb_gz_plugin</name>
+  <version>0.1.0</version>
+  <description>
+    Gazebo Harmonic System plugin that simulates UWB ranging measurements
+    between a "tag" link on a vehicle model and a set of "anchor" models
+    placed in the world. Designed as a drop-in replacement for the original
+    GiacomoCorradini/uwb_gazebo_plugin (Gazebo Classic) targeting ROS 2
+    Humble + gz-sim8.
+  </description>
+  <maintainer email="an@todo.todo">an</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>gz-cmake3</depend>
+  <depend>gz-plugin2</depend>
+  <depend>gz-sim8</depend>
+  <depend>gz-common5</depend>
+  <depend>gz-math7</depend>
+  <depend>gz-msgs10</depend>
+  <depend>gz-transport13</depend>
+  <depend>eigen3</depend>
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>ros_gz_interfaces</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <gz-plugin2 plugin="uwb_gz_plugin::systems::UwbSystem"
+                name="uwb_gz_plugin::systems::UwbSystem"/>
+  </export>
+</package>

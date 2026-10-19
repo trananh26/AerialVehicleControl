@@ -1,0 +1,38 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <model name="uwb_anchor_template">
+    <!-- The plugin picks anchors by name prefix "uwb_anchor". We give a
+         template here; the actual anchors in the world override the name. -->
+    <pose>0 0 0 0 0 0</pose>
+    <static>true</static>
+    <link name="anchor_link">
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>0.20 0.20 0.20</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.1 0.1 0.1 1</ambient>
+          <diffuse>0.8 0.1 0.1 1</diffuse>
+          <specular>0.5 0.5 0.5 1</specular>
+        </material>
+      </visual>
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>0.20 0.20 0.20</size>
+          </box>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.0001</ixx>
+          <iyy>0.0001</iyy>
+          <izz>0.0001</izz>
+        </inertia>
+      </inertial>
+    </link>
+  </model>
+</sdf>

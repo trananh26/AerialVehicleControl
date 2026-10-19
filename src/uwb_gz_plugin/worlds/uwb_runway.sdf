@@ -1,0 +1,110 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="uwb_runway">
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin filename="gz-sim-air-pressure-system"
+            name="gz::sim::systems::AirPressure">
+    </plugin>
+    <plugin filename="gz-sim-air-speed-system"
+            name="gz::sim::systems::AirSpeed">
+    </plugin>
+    <plugin filename="gz-sim-altimeter-system"
+            name="gz::sim::systems::Altimeter">
+    </plugin>
+    <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu">
+    </plugin>
+    <plugin filename="gz-sim-magnetometer-system"
+            name="gz::sim::systems::Magnetometer">
+    </plugin>
+    <plugin filename="gz-sim-navsat-system"
+            name="gz::sim::systems::NavSat">
+    </plugin>
+
+    <!-- The UWB System is attached to the world so it ticks every step. -->
+    <plugin filename="uwb_gz_plugin"
+            name="uwb_gz_plugin::systems::UwbSystem">
+      <update_rate>20.0</update_rate>
+      <tag_id>0</tag_id>
+      <tag_model_name>x500</tag_model_name>
+      <tag_link>base_link</tag_link>
+      <all_los>true</all_los>
+      <max_range>50.0</max_range>
+      <los_std>0.05</los_std>
+    </plugin>
+
+    <scene>
+      <ambient>1.0 1.0 1.0</ambient>
+      <background>0.8 0.8 0.8</background>
+      <sky></sky>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.8 0.8 0.8 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <spherical_coordinates>
+      <latitude_deg>-35.3632621</latitude_deg>
+      <longitude_deg>149.1652374</longitude_deg>
+      <elevation>10.0</elevation>
+      <heading_deg>0</heading_deg>
+      <surface_model>EARTH_WGS84</surface_model>
+    </spherical_coordinates>
+
+    <include>
+      <uri>model://runway</uri>
+      <pose degrees="true">-29 545 0 0 0 363</pose>
+    </include>
+
+    <!-- 4 static UWB anchors in a 10x10 m square (x=0..10, y=0..10). -->
+    <include>
+      <uri>model://uwb_anchor</uri>
+      <name>uwb_anchor0</name>
+      <pose>0 0 2.0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://uwb_anchor</uri>
+      <name>uwb_anchor1</name>
+      <pose>10 0 2.0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://uwb_anchor</uri>
+      <name>uwb_anchor2</name>
+      <pose>10 10 2.0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://uwb_anchor</uri>
+      <name>uwb_anchor3</name>
+      <pose>0 10 2.0 0 0 0</pose>
+    </include>
+
+    <!-- NOTE: the x500 model is spawned at runtime by ros_gz_sim create
+         (see x500_uwb.launch.py) so we do NOT include it here.  Doing
+         otherwise would create a duplicate.  Position the robot via the
+         x= / y= / z= launch arguments. -->
+
+  </world>
+</sdf>
