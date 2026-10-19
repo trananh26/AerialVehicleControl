@@ -1,0 +1,23 @@
+# =============================================================================
+# MAVROS configuration for the UWB indoor pose pipeline.
+#
+# This file is loaded by ``mavros_node`` via the ``pluginlists_yaml`` +
+# ``config_yaml`` parameters. We extend the APM defaults by enabling
+# ``vision_pose_estimate`` (the plugin that turns
+# ``/mavros/vision_pose/pose`` into a MAVLink ``VISION_POSITION_ESTIMATE``).
+# =============================================================================
+/**:
+  ros__parameters:
+    # vision_pose plugin: convert /mavros/vision_pose/pose (PoseStamped)
+    # and /mavros/vision_pose/pose_cov (PoseWithCovarianceStamped) into
+    # MAVLink VISION_POSITION_ESTIMATE (msg 102).
+    vision_pose:
+      frame_id: "map"
+    # Tighten the EKF acceptance gate so the FC won't reject noisy samples
+    # while the simulation is still warming up.
+    setpoint_position:
+      tf:
+        listen: false
+        frame_id: "map"
+        child_frame_id: "uwb_tag"
+        rate_limit: 50.0

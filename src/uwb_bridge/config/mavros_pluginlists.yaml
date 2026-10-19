@@ -1,0 +1,11 @@
+# =============================================================================
+# Plugin list for the UWB MAVROS instance.
+#
+# Overrides the default apm_pluginlists.yaml with an EMPTY denylist,
+# so every plugin discovered via MAVROS_PLUGIN_LIBS is loaded — including
+# the vision_pose plugin from mavros_extras.
+# =============================================================================
+/**:
+  ros__parameters:
+    plugin_denylist: []
+    plugin_allowlist: []

@@ -1,0 +1,54 @@
+# =============================================================================
+# ArduPilot parameters for SITL + UWB-only indoor navigation.
+#
+# Based on copter-vicon.parm, but extended for the UWB trilateration
+# pipeline:
+#   - All GPS sources disabled (UWB is the only horizontal position source)
+#   - VISO_TYPE 2 (MAVLink VISION_POSITION_ESTIMATE, msg 102)
+#   - All EKF sources set to ExternalNav (6) so the FC consumes the
+#     vision-derived pose for position, velocity, and yaw.
+#   - No compass (UWB doesn't carry heading on its own; we ship a
+#     identity quaternion from the trilaterator).
+#   - MAVLink stream rates bumped so MAVROS sees fresh data at 50 Hz.
+#   - VISO delay set to 0 since the simulator is real-time and the
+#     trilaterator is the source of truth.
+# =============================================================================
+AHRS_EKF_TYPE 3
+EK2_ENABLE 0
+EK3_ENABLE 1
+EK3_SRC1_POSXY 6
+EK3_SRC1_VELXY 6
+EK3_SRC1_POSZ 6
+EK3_SRC1_VELZ 6
+EK3_SRC1_YAW 6
+VISO_TYPE 2
+VISO_DELAY_MS 0
+COMPASS_USE 0
+COMPASS_USE2 0
+COMPASS_USE3 0
+GPS1_TYPE 0
+GPS2_TYPE 0
+SERIAL5_PROTOCOL 2
+SR0_EXTRA1 50
+SR0_EXTRA2 50
+SR0_POSITION 50
+SR0_ATTITUDE 50
+SR1_EXTRA1 50
+SYSID_MYGCS 255
+LOG_REPLAY 0
+DISARM_DELAY 0
+SIM_GPS_DISABLE 1
+SIM_BARO_DISABLE 1
+SIM_MAG_DISABLE 1
+ARMING_REQUIRE 0
+ARMING_CHECK 0
+INS_GYR_CAL 0
+INS_ACCEL_CAL 0
+FS_GCS_ENABLE 0
+FS_EKF_ACTION 0
+FS_EKF_THRESH 0
+FS_THR_ENABLE 0
+FS_CRASH_CHECK 0
+BATT_MONITOR 0
+FRAME_TYPE 1
+LNDMC_ALT 2

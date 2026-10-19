@@ -1,0 +1,26 @@
+# ros_gz_bridge configuration for the UWB plugin.
+#
+# NOTE: ros_gz_bridge 0.244 was built against ignition::msgs (the old name);
+# the type strings in the YAML are still "ignition.msgs.*" even though the
+# gz-transport runtime exposes the same types as "gz.msgs.*".
+
+- gz_topic_name: "/uwb/ranging/tag"
+  ros_topic_name: "/uwb/ranging/ros"
+  gz_type_name: "ignition.msgs.Pose"
+  ros_type_name: "geometry_msgs/msg/Pose"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- gz_topic_name: "/uwb/tag_pose/tag"
+  ros_topic_name: "/uwb/tag_pose/ros"
+  gz_type_name: "ignition.msgs.Pose"
+  ros_type_name: "geometry_msgs/msg/Pose"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- gz_topic_name: "/uwb/anchors/tag"
+  ros_topic_name: "/uwb/anchors/0"
+  gz_type_name: "ignition.msgs.Marker"
+  ros_type_name: "visualization_msgs/msg/Marker"
+  direction: GZ_TO_ROS
+  lazy: true
