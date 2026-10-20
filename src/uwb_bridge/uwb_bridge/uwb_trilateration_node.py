@@ -419,6 +419,24 @@ class TrilaterationNode(Node):
 
         cov6 = np.zeros((6, 6))
         cov6[: J.shape[1], : J.shape[1]] = sigma2_param
+
+        # Every diagonal entry MUST be non-zero.  A zero variance tells the
+        # EKF the measurement is infinitely precise, so *any* innovation is
+        # rejected — which is exactly what makes ArduPilot log
+        # "EKF3 IMU0 stopped aiding" in a tight loop at the sensor rate.
+        # When z is held constant we have no z estimate from ranges at all,
+        # so report a deliberately loose (1 m^2) variance instead of zero.
+        #
+        # The absolute floor of 0.01 m^2 (1-sigma 10 cm) keeps a degenerate
+        # Jacobian from claiming sub-centimetre precision.
+        min_var = 0.01
+        for i in range(6):
+            if cov6[i, i] < min_var:
+                cov6[i, i] = min_var
+        if assume_z:
+            # z is not observed — report 1 m^2 (1-sigma 1 m) rather than 0.
+            cov6[2, 2] = 1.0
+
         # Roll / pitch / yaw covariance is unknown from ranging.
         cov6[3, 3] = 1.0  # large orientation uncertainty (rad^2)
         cov6[4, 4] = 1.0

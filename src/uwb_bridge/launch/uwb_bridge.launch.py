@@ -72,7 +72,9 @@ def generate_launch_description() -> LaunchDescription:
             }],
         ),
 
-        # ---- relay: /uwb/pose_cov -> /mavros/vision_pose/pose ----
+        # ---- relay: /uwb/pose_cov -> /mavros/odometry/in ----
+        # ODOMETRY (not VISION_POSITION_ESTIMATE) is the nav input because it
+        # carries velocity as well as position; EKF3 source 6 needs both.
         Node(
             package=pkg_dir,
             executable="uwb_to_mavros_vision_node",
@@ -80,8 +82,12 @@ def generate_launch_description() -> LaunchDescription:
             output="screen",
             parameters=[{
                 "input_topic": "/uwb/pose_cov",
-                "output_topic": "/mavros/vision_pose/pose",
+                "output_topic": "/mavros/odometry/in",
                 "frame_id": "map",
+                "child_frame_id": "uwb_tag",
+                # Strictly GPS-free: no NavSatFix is published.
+                "publish_gps_input": False,
+                "publish_vision_pose": True,
             }],
         ),
 

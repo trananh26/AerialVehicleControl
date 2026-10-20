@@ -8,4 +8,12 @@
 /**:
   ros__parameters:
     plugin_denylist: []
-    plugin_allowlist: []
+    # Explicitly allow-list the plugins this pipeline needs.  Anything not
+    # named here is still loaded by MAVROS' default allow-all behaviour, but
+    # being explicit documents the dependency and survives future changes to
+    # the apt build's default plugin set.
+    plugin_allowlist:
+      - odometry
+      - vision_pose
+      - vision_speed
+      - px4_mavlink

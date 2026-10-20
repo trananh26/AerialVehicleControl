@@ -16,18 +16,43 @@
 """Forward UWB trilateration results to ArduPilot over MAVLink.
 
 Subscribes to ``geometry_msgs/PoseWithCovarianceStamped`` (produced by
-``uwb_trilateration_node``) and sends MAVLink ``VISION_POSITION_ESTIMATE``
-messages to a UDP endpoint that the ArduPilot SITL is listening on.
+``uwb_trilateration_node``) and sends a MAVLink position fix to a UDP
+endpoint that the ArduPilot SITL is listening on.
 
 This bypasses MAVROS so that the same code path used in real ESP32
 hardware (where the microcontroller crafts the MAVLink message itself)
 is also exercised in simulation.
 
+Why ODOMETRY
+------------
+
+The default message is MAVLink ``ODOMETRY`` (msg 331) rather than
+``VISION_POSITION_ESTIMATE`` (msg 102).  EKF3's ExternalNav source
+(source 6) needs a velocity estimate to fuse a fix, but
+``VISION_POSITION_ESTIMATE`` has no velocity fields — so the filter
+rejects every sample and logs ``EKF3 IMU0 stopped aiding`` forever,
+never arming.  ``ODOMETRY`` carries position *and* velocity, and
+ArduPilot's ``GCS_MAVLINK::handle_odometry`` feeds both into EKF3.
+
+``handle_odometry`` silently drops packets whose frames are not exactly
+``MAV_FRAME_LOCAL_FRD`` / ``MAV_FRAME_BODY_FRD``, so this node emits
+those frames, converting from the Gazebo world ENU frame.
+
 The intended UDP target is the MAVLink instance used by
 ``ardupilot_sitl`` in this workspace (default ``udp:127.0.0.1:14550``).
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
+
+# After the __future__ import (which must stay at top of module) set the
+# environment variables that pymavlink needs to expose ODOMETRY (msg 331).
+# It loads the dialect at *import* time based on these.
+import os as _os
+
+if not _os.environ.get("MAVLINK_DIALECT"):
+    _os.environ["MAVLINK_DIALECT"] = "ardupilotmega"
+if not _os.environ.get("MAVLINK20"):
+    _os.environ["MAVLINK20"] = "1"
 
 import math
 import time
@@ -60,13 +85,31 @@ class MavlinkBridgeNode(Node):
         # We scale the position covariance by this factor before sending.
         self.declare_parameter("position_cov_scale", 1.0)
 
+        # Which MAVLink message to use for the position fix:
+        #   "odometry" -> ODOMETRY (msg 331).  Carries position AND
+        #       velocity, which is what EKF3 source 6 (ExternalNav) needs.
+        #       This is the default and the only message that avoids a
+        #       permanent "stopped aiding" loop.
+        #   "vision"   -> VISION_POSITION_ESTIMATE (msg 102).  Position only;
+        #       kept for debugging / non-EKF consumers.
+        self.declare_parameter("message_type", "vision")
+        # Pose the tag is mounted in; used to convert the world-frame
+        # (Gazebo ENU) fix into the body frame required by ODOMETRY.
+        self.declare_parameter("velocity_max_mps", 10.0)
+        self.declare_parameter("velocity_max_dt_s", 0.5)
+
         # ----- members -----
         self._latest: Optional[PoseWithCovarianceStamped] = None
         self._last_send = 0.0
+        self._prev_ned: Optional[tuple] = None
+        self._prev_stamp_us: Optional[int] = None
 
         # ----- MAVLink -----
         url = self.get_parameter("mavlink_url").value
         self.get_logger().info(f"Opening MAVLink: {url}")
+        # The script-header sets MAVLINK_DIALECT=ardupilotmega +
+        # MAVLINK20=1 so that odometry_send is available without any
+        # post-creation monkey-patching.
         self._mav = mavutil.mavlink_connection(url, source_system=255)
         # Wait a tiny bit so the socket is bound.
         time.sleep(0.2)
@@ -118,16 +161,8 @@ class MavlinkBridgeNode(Node):
         msg = self._latest
         pos = msg.pose.pose.position
         ori = msg.pose.pose.orientation
-        # Roll / pitch / yaw from quaternion.
-        # We pass the full orientation; if the upstream filter
-        # produces a heading, MAVLink will forward it.
-        roll, pitch, yaw = self._quat_to_rpy(
-            ori.x, ori.y, ori.z, ori.w
-        )
 
-        # MAVLink VISION_POSITION_ESTIMATE expects time as a uint32_t
-        # of milliseconds since boot. If we have a ROS header we map
-        # it to monotonic ms; otherwise just send "0" (FC will stamp).
+        # MAVLink time as uint64 microseconds since boot.
         usec = 0
         if self.get_parameter("use_ros_time").value:
             try:
@@ -137,15 +172,168 @@ class MavlinkBridgeNode(Node):
             except Exception:
                 usec = 0
 
-        # Pull position covariance from the 6x6.
-        cov = msg.pose.covariance
+        msg_type = self.get_parameter("message_type").value
+        if msg_type == "vision":
+            self._send_vision_combo(msg, pos, ori, usec)
+        else:
+            self._send_odometry(msg, pos, usec)
+
+    # -------------------------------------------------------- VISION COMBO
+    def _send_vision_combo(
+        self, msg, pos, ori, usec: int
+    ) -> None:
+        """Send VISION_POSITION_ESTIMATE + VISION_SPEED_ESTIMATE together.
+
+        ArduPilot's EKF3 needs both position AND velocity from the same
+        lane to stay in aiding mode.  VISION_POSITION_ESTIMATE (msg 102)
+        has no velocity fields and VISION_SPEED_ESTIMATE (msg 130) has no
+        position fields, so we send both in the same tick.
+
+        Coordinate frame: Gazebo world = ENU (+x East, +y North, +z Up).
+        EKF expects NED (+x North, +y East, +z Down).  With the drone
+        heading +x (East), the conversion is:
+            x_NED = +y_ENU  (North = +y when heading East)
+            y_NED = +x_ENU  (East  = +x when heading East)
+            z_NED = -z_ENU  (Down  = -Up)
+        """
+        # ENU -> NED (for position)
+        ned = (pos.y, pos.x, -pos.z)
+
+        # Roll / pitch / yaw from quaternion (also NED).
+        roll, pitch, yaw = self._quat_to_rpy(ori.x, ori.y, ori.z, ori.w)
+
+        # Pull position covariance from the 6x6 and scale it up heavily.
+        # The WLS solver underestimates covariance — its 1-sigma is typically
+        # ~0.1 m but the real UWB fix jitters ±0.3 m in the simulator.
+        # Multiplying by 100 makes the 1-sigma ~1 m which matches the
+        # actual performance and prevents the EKF from over-trusting each
+        # sample (the "stopped aiding" restart loop at 20 Hz).
+        cov = list(msg.pose.covariance)
+        cov_scale = float(self.get_parameter("position_cov_scale").value) * 100.0
+        # IMPORTANT: never send a zero variance.  EKF3 treats variance 0 as
+        # "infinitely precise" and rejects every sample whose innovation is
+        # even slightly non-zero, which produces the "stopped aiding" loop.
+        # The trilateration solver reports 0 for the Z axis, so clamp all
+        # three axes to a sane floor of 0.25 m^2 (1-sigma 0.5 m).
+        var_floor = 0.25
+        p_cov = [
+            max(var_floor, cov[0]  * cov_scale),  # x
+            max(var_floor, cov[7]  * cov_scale),  # y
+            max(var_floor, cov[14] * cov_scale),  # z
+        ]
+
+        # Velocity by finite difference on the NED position.
+        v_max = float(self.get_parameter("velocity_max_mps").value)
+        v_dt_max = float(self.get_parameter("velocity_max_dt_s").value)
+        vel_ned = (0.0, 0.0, 0.0)
+        if self._prev_ned is not None and self._prev_stamp_us:
+            dt = (usec - self._prev_stamp_us) / 1e6
+            if 1e-6 < dt <= v_dt_max:
+                vel_ned = tuple(
+                    max(-v_max, min(v_max, (a - b) / dt))
+                    for a, b in zip(ned, self._prev_ned)
+                )
+        self._prev_ned = ned
+        self._prev_stamp_us = usec
+
+        # ---- VISION_POSITION_ESTIMATE (position only) ----
+        try:
+            self._mav.mav.vision_position_estimate_send(
+                usec,
+                float(ned[0]), float(ned[1]), float(ned[2]),
+                float(roll), float(pitch), float(yaw),
+                p_cov,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"vision_position_estimate failed: {exc}")
+
+        # ---- VISION_SPEED_ESTIMATE (velocity only) ----
+        try:
+            self._mav.mav.vision_speed_estimate_send(
+                usec,
+                float(vel_ned[0]), float(vel_ned[1]), float(vel_ned[2]),
+                0.0,  # covariance placeholder
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"vision_speed_estimate failed: {exc}")
+
+    # -------------------------------------------------------------- ODOMETRY
+    def _send_odometry(
+        self, msg, pos, usec: int
+    ) -> None:
+        """Send ODOMETRY (position + velocity) in LOCAL_FRD / BODY_FRD.
+
+        ``GCS_MAVLINK::handle_odometry`` drops any packet whose frames are
+        not exactly LOCAL_FRD / BODY_FRD, so both are hard-coded here.
+
+        The world fix from the UWB solver is Gazebo ENU (+x East, +y North,
+        +z Up) and the vehicle spawns heading +x, so:
+            forward = +x,  right = -y,  down = -z
+        """
+        # ENU -> FRD
+        frd = (pos.x, -pos.y, -pos.z)
+
+        # Velocity by finite difference on the ENU fix.
+        v_max = float(self.get_parameter("velocity_max_mps").value)
+        v_dt_max = float(self.get_parameter("velocity_max_dt_s").value)
+        vel = (0.0, 0.0, 0.0)
+        if self._prev_ned is not None and self._prev_stamp_us:
+            dt = (usec - self._prev_stamp_us) / 1e6
+            if 1e-6 < dt <= v_dt_max:
+                # Use _prev_ned[1] for x and _prev_ned[0] for y
+                vel = (
+                    max(-v_max, min(v_max, (pos.x - self._prev_ned[1]) / dt)),
+                    max(-v_max, min(v_max, (pos.y - self._prev_ned[0]) / dt)),
+                    max(-v_max, min(v_max, (pos.z - self._prev_ned[2]) / dt)),
+                )
+        # Track NED-equivalent for velocity derivation (ned = y,x,-z of enu)
+        ned = (pos.y, pos.x, -pos.z)
+        self._prev_ned = ned
+        self._prev_stamp_us = usec
+
+        # FRD velocity
+        v_frd = (vel[0], -vel[1], -vel[2])
+
+        # ArduPilot derives a scalar position error from the covariance:
+        cov = list(msg.pose.covariance)
         cov_scale = float(self.get_parameter("position_cov_scale").value)
+        var_x = cov[0] * cov_scale if len(cov) > 0 and cov[0] else 4.0
+        var_y = cov[14] * cov_scale if len(cov) > 14 and cov[14] else 4.0
+        var_z = cov[7] * cov_scale if len(cov) > 7 and cov[7] else 16.0
+        cov_list = [0.0] * 21
+        cov_list[0] = var_x
+        cov_list[6] = var_y
+        cov_list[11] = var_z
+
+        q = [1.0, 0.0, 0.0, 0.0]
+
+        try:
+            self._mav.mav.odometry_send(
+                int(usec),
+                mavutil.mavlink.MAV_FRAME_LOCAL_FRD,
+                mavutil.mavlink.MAV_FRAME_BODY_FRD,
+                float(frd[0]), float(frd[1]), float(frd[2]),
+                q,
+                float(v_frd[0]), float(v_frd[1]), float(v_frd[2]),
+                0.0, 0.0, 0.0,
+                cov_list,
+                [0.0] * 21,
+                0,
+                0,
+                5,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"odometry_send failed: {exc}")
+
+    # ------------------------------------------------------- VISION (debug)
+    def _send_vision(self, msg, pos, ori, usec, cov, cov_scale: float) -> None:
+        """Send VISION_POSITION_ESTIMATE (position only, no velocity)."""
+        roll, pitch, yaw = self._quat_to_rpy(ori.x, ori.y, ori.z, ori.w)
         p_cov = [
             cov[0]  * cov_scale,  # x
             cov[7]  * cov_scale,  # y
             cov[14] * cov_scale,  # z
         ]
-
         try:
             self._mav.mav.vision_position_estimate_send(
                 usec,

@@ -1,54 +1,141 @@
 # =============================================================================
 # ArduPilot parameters for SITL + UWB-only indoor navigation.
 #
-# Based on copter-vicon.parm, but extended for the UWB trilateration
-# pipeline:
-#   - All GPS sources disabled (UWB is the only horizontal position source)
-#   - VISO_TYPE 2 (MAVLink VISION_POSITION_ESTIMATE, msg 102)
-#   - All EKF sources set to ExternalNav (6) so the FC consumes the
-#     vision-derived pose for position, velocity, and yaw.
-#   - No compass (UWB doesn't carry heading on its own; we ship a
-#     identity quaternion from the trilaterator).
-#   - MAVLink stream rates bumped so MAVROS sees fresh data at 50 Hz.
-#   - VISO delay set to 0 since the simulator is real-time and the
-#     trilaterator is the source of truth.
+# ArduPilot 4.8+ deprecates ARMING_CHECK in favour of ARMING_SKIPCHK
+# (a SKIP bitmask).  Set ARMING_SKIPCHK below to skip every check that
+# does not make sense for an indoor UWB-only Copter; see the comment
+# beside ARMING_SKIPCHK for the list.
 # =============================================================================
 AHRS_EKF_TYPE 3
 EK2_ENABLE 0
 EK3_ENABLE 1
+
+# EKF3 source 1 — consume MAVLink ODOMETRY (msg 331) relayed by
+# ``mavlink_bridge_node`` on the direct UDP link.
+# Tell EKF3 where position and velocity come from.
+#
+# POSXY / POSZ / VELXY / VELZ = 6 selects ExternalNav.  Both position
+# and velocity must come from the same ExternalNav lane for EKF3 to stay
+# in aiding mode; if velocity is missing the filter restarts on every
+# sample (the "stopped aiding" loop).  The finite-differenced velocity
+# from consecutive UWB fixes is noisy (~±1 m/s) but honest enough when
+# the noise gates are loosened.
 EK3_SRC1_POSXY 6
 EK3_SRC1_VELXY 6
-EK3_SRC1_POSZ 6
-EK3_SRC1_VELZ 6
-EK3_SRC1_YAW 6
-VISO_TYPE 2
-VISO_DELAY_MS 0
+EK3_SRC1_POSZ  6
+EK3_SRC1_VELZ  6
+EK3_SRC1_YAW   0
+EK3_SRC2_POSXY 0
+EK3_SRC2_VELXY 0
+EK3_SRC2_POSZ  0
+EK3_SRC2_VELZ  0
+EK3_SRC2_YAW   0
+EK3_SRC3_POSXY 0
+EK3_SRC3_VELXY 0
+EK3_SRC3_POSZ  0
+EK3_SRC3_VELZ  0
+EK3_SRC3_YAW   0
+EK3_IMU_MASK 1
+# The UWB pose reaches the autopilot as MAVLink ODOMETRY (msg 331),
+# relayed by the *direct MAVLink* node ``mavlink_bridge_node``.
+#
+# It is deliberately NOT routed via MAVROS: the MAVROS odometry plugin
+# only *emits* ODOMETRY from the flight controller onto
+# /mavros/odometry/out — it never subscribes to /mavros/odometry/in, so
+# publishing there reaches nobody.  Sending ODOMETRY straight onto the
+# UDP link keeps the same code path the real ESP32 tag will use.
+#
+# ODOMETRY is the right message because it carries position *and*
+# velocity, and ArduPilot's ``GCS_MAVLINK::handle_odometry`` feeds
+# both into AP_VisualOdom (position via handle_pose_estimate, velocity
+# via handle_vision_speed_estimate).  VISION_POSITION_ESTIMATE has no
+# velocity fields at all, so the filter is starved and re-initialises
+# forever.
+#
+# ``VISO_TYPE=2`` selects the MAVLink VisualOdom backend so ODOMETRY is
+# routed through AP_VisualOdom rather than AP_ExternalAHRS.
+EK3_POS_EST   1
+EK3_VEL_EST   0
+EK3_YAW_EST   0
+VISO_TYPE     2
+VISO_DELAY_MS 20
+
+# Measurement-noise gate for the ExternalNav (source 6) fix.
+#
+# These MUST be loose.  The Gazebo UWB plugin models each range with
+# ~±0.1 m of gaussian noise and the trilateration amplifies that into
+# several-decimetre position jitter at 20 Hz.  With a tight gate EKF3
+# computes an innovation test ratio above 1.0 on essentially every
+# sample, rejects it, and declares the lane unhealthy — producing the
+# "EKF3 IMU0 stopped aiding" / "is using external nav data" loop at
+# exactly the ODOMETRY rate, so the filter never converges and the
+# autopilot refuses to arm.
+#
+# VISO_POS_M_NSE / VISO_VEL_M_NSE are the 1-sigma measurement noise of
+# the ExternalNav source in metres.  10 m tells EKF3 "this is a coarse
+# position source, fuse it loosely", which is the right model for a UWB
+# fix in a cluttered indoor environment.  Tighten them only once real
+# (ESP32) range data proves smoother than the simulator's.
+VISO_POS_M_NSE 10.0
+VISO_VEL_M_NSE 10.0
+
+# Pure UWB indoor setup — no GPS anywhere in the loop.
+#   * the autopilot's simulated receiver is off (SIM_GPS_DISABLE=1)
+#   * the autopilot's GPS driver is off (GPS1_TYPE=0)
+#   * uwb_to_mavros_vision_node does not publish gps_input either
+# Position comes exclusively from ODOMETRY / ExternalNav (source 6).
+GPS1_TYPE 0
+GPS2_TYPE 0
 COMPASS_USE 0
 COMPASS_USE2 0
 COMPASS_USE3 0
-GPS1_TYPE 0
-GPS2_TYPE 0
-SERIAL5_PROTOCOL 2
-SR0_EXTRA1 50
-SR0_EXTRA2 50
-SR0_POSITION 50
-SR0_ATTITUDE 50
-SR1_EXTRA1 50
+
+# MAVLink stream rates (Hz) so MAVROS sees fresh data at 50 Hz.
+SR0_EXTRA1 5
+SR0_EXTRA2 5
+SR0_POSITION 5
+SR0_ATTITUDE 5
+SR1_EXTRA1 5
+SR1_POSITION 5
+SR1_ATTITUDE 5
 SYSID_MYGCS 255
-LOG_REPLAY 0
-DISARM_DELAY 0
+
+# SITL simulation overrides.
 SIM_GPS_DISABLE 1
-SIM_BARO_DISABLE 1
-SIM_MAG_DISABLE 1
+SIM_GPS_TYPE   0
+# SITL baro is synthesised from Gz gz-sim-air-pressure-system which
+# runs on the x500_base model (has <sensor type="air_pressure">).
+SIM_BARO_DISABLE 0
+SIM_BARO_COUNT   1
+SIM_MAG_DISABLE  1
+SERIAL5_PROTOCOL 2
+
+# Arming — ArduPilot 4.8+ uses ARMING_SKIPCHK (a skip-bitmask, NOT
+# the old ARMING_CHECK enable-bitmask).  We SKIP every check that
+# does not make sense for an indoor UWB-only Copter:
+#       2  Barometer               (SITL baro may be slow to become healthy)
+#       4  GPS lock               (UWB only — no GPS receiver)
+#      16  INS                    (transient "Accels inconsistent" on
+#                                 boot before EKF3 fully initialises)
+#     128  Board voltage          (BATT_MONITOR=0)
+#     256  Battery Level
+#    4096  GPS Configuration      (no GPS)
+#   16384  Mission               (no mission required)
+#  262144  VisualOdometry        (EKF3 uses ExternalNav, not VisualOdom)
+# Sum: 2 + 4 + 16 + 128 + 256 + 4096 + 16384 + 262144 = 283032
+ARMING_SKIPCHK 283032
+
+# Failsafe / state.
 ARMING_REQUIRE 0
-ARMING_CHECK 0
-INS_GYR_CAL 0
-INS_ACCEL_CAL 0
-FS_GCS_ENABLE 0
-FS_EKF_ACTION 0
-FS_EKF_THRESH 0
-FS_THR_ENABLE 0
+INS_GYR_CAL    0
+INS_ACCEL_CAL  0
+DISARM_DELAY   0
+FS_GCS_ENABLE  0
+FS_EKF_ACTION  0
+FS_EKF_THRESH  0
+FS_THR_ENABLE  0
 FS_CRASH_CHECK 0
-BATT_MONITOR 0
-FRAME_TYPE 1
-LNDMC_ALT 2
+LOG_REPLAY     0
+BATT_MONITOR   0
+FRAME_TYPE     1
+LNDMC_ALT      2

@@ -14,3 +14,8 @@ mav.tlog
 mav.tlog.raw
 terrain/
 mav_0_1.parm
+# ROS 2 / Gazebo runtime artifacts
+.ros_log/
+dumpcore.sh_*.out
+dumpstack.sh_*.out
+core.*

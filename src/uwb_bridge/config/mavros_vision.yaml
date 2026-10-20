@@ -8,9 +8,19 @@
 # =============================================================================
 /**:
   ros__parameters:
+    # odometry plugin: convert /mavros/odometry/in (nav_msgs/Odometry) into
+    # MAVLink ODOMETRY (msg 331).  This is the *primary* nav input — unlike
+    # VISION_POSITION_ESTIMATE it carries velocity, which is what EKF3
+    # source 6 (ExternalNav) requires to avoid "stopped aiding".
+    odometry:
+      # Parent/child frame ids must map to LOCAL_FRD / BODY_FRD; the node
+      # already emits FRD-converted coordinates.
+      frame_id: "map"
+      child_frame_id: "uwb_tag"
     # vision_pose plugin: convert /mavros/vision_pose/pose (PoseStamped)
     # and /mavros/vision_pose/pose_cov (PoseWithCovarianceStamped) into
-    # MAVLink VISION_POSITION_ESTIMATE (msg 102).
+    # MAVLink VISION_POSITION_ESTIMATE (msg 102).  Kept for ROS-side
+    # consumers only — EKF3 does not fuse this one.
     vision_pose:
       frame_id: "map"
     # Tighten the EKF acceptance gate so the FC won't reject noisy samples
