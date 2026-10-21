@@ -1,37 +1,38 @@
 repositories:
-  # ── Repos có thay đổi → trỏ vào fork ────────────────────────
+  # Trỏ tất cả vào branch x500_model của fork — khớp với .gitmodules.
+  # Repo file này được giữ lại làm tài liệu tham khảo; việc checkout thực tế
+  # thực hiện bằng `git submodule` (.gitmodules), không dùng vcs import nữa.
   ardupilot:
     type: git
     url: https://github.com/NguyenAn20279/ardupilot.git
-    version: feat/arducopter-only-gazebo-sitl
+    version: x500_model
+
+  ardupilot_gazebo:
+    type: git
+    url: https://github.com/NguyenAn20279/ardupilot_gazebo.git
+    version: x500_model
 
   ardupilot_gz:
     type: git
     url: https://github.com/NguyenAn20279/ardupilot_gz.git
-    version: feat/arducopter-only-gazebo-sitl
+    version: x500_model
 
   ardupilot_sitl_models:
     type: git
     url: https://github.com/NguyenAn20279/SITL_Models.git
-    version: feat/arducopter-only-gazebo-sitl
-
-  ros_gz:
-    type: git
-    url: https://github.com/NguyenAn20279/ros_gz.git
-    version: feat/arducopter-only-gazebo-sitl
-
-  # ── Repos chưa sửa → trỏ vào fork, giữ nguyên branch gốc ───
-  ardupilot_gazebo:
-    type: git
-    url: https://github.com/NguyenAn20279/ardupilot_gazebo.git
-    version: ros2
+    version: x500_model
 
   micro_ros_agent:
     type: git
     url: https://github.com/NguyenAn20279/micro-ROS-Agent.git
-    version: humble
+    version: x500_model
+
+  ros_gz:
+    type: git
+    url: https://github.com/NguyenAn20279/ros_gz.git
+    version: x500_model
 
   sdformat_urdf:
     type: git
     url: https://github.com/NguyenAn20279/sdformat_urdf.git
-    version: humble
+    version: x500_model
