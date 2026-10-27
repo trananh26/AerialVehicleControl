@@ -12,10 +12,12 @@ setup(
             ["resource/" + package_name],
         ),
         ("share/" + package_name, ["package.xml"]),
-        ("share/" + package_name + "/config", ["config/beacon.parm"]),
+        ("share/" + package_name + "/config", ["config/x500_uwb.parm"]),
         (
             "share/" + package_name + "/launch",
-            ["launch/uwb_pozyx_sitl.launch.py"],
+            [
+                "launch/x500_uwb_runway.launch.py",
+            ],
         ),
         (
             "share/" + package_name + "/tools",
@@ -24,6 +26,7 @@ setup(
                 "tools/compare_positions.py",
                 "tools/inspect_frames.py",
                 "tools/fake_ranging_source.py",
+                "tools/verify_fdm_coupling.py",
             ],
         ),
     ],

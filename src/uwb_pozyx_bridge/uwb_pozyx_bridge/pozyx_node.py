@@ -106,7 +106,9 @@ class PozyxBridgeNode(Node):
         )
 
         self._pub_pose = self.create_publisher(
-            PoseStamped, self.get_parameter("output_pose_topic").value, 10
+            PoseStamped,
+            self.get_parameter("output_pose_topic").value,
+            qos,
         )
 
         # ----- transport -----

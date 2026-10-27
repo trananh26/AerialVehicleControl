@@ -532,6 +532,98 @@ tag pose `(5.000, 5.000)`, EKF beacon vẫn fuse bình thường.
 
 ---
 
+### R16 — SITL phải dùng `--model json` và model **có** ArduPilotPlugin
+
+Đây là rủi ro nghiêm trọng nhất, vì nó tạo ra **false pass**: mọi gate đều
+báo PASS trong khi drone thực tế không hề bị điều khiển.
+
+Hai điều phải đúng cùng lúc:
+
+1. **SITL phải nối tới FDM port 9002.** Chỉ `--model json` mới làm được
+   (`SIM_JSON.h: control_port = 9002`). `--model x500` kích hoạt mô hình
+   bay nội bộ của ArduPilot — SITL bay một chiếc drone ảo, hoàn toàn tách
+   rời khỏi Gazebo.
+2. **Model trong Gazebo phải chứa `ArduPilotPlugin`.** Model
+   `x500_with_ardupilot` có plugin; `x500_base` thì không.
+
+Khi đúng, log Gazebo hiện:
+
+```
+[Dbg] [SystemManager.cc:80] Loaded system [ArduPilotPlugin] for entity [27]
+[Dbg] [ArduPilotPlugin.cc:1168] Computed IMU topic to be:
+      world/uwb_runway/model/x500/link/base_link/sensor/imu_sensor/imu
+[Wrn] [ArduPilotPlugin.cc:1599] ArduPilot controller has reset
+```
+
+Dòng *"has reset"* **không phải** lỗi — đó là báo hiệu frame counter của
+SITL bị reset, tức là FDM handshake đã thành công.
+
+**Cách kiểm chứng dứt khoát:** `tools/verify_fdm_coupling.py` arm drone và
+cất cánh, rồi so sánh độ cao Gazebo với EKF. Drone chỉ bay được khi SITL
+thực sự điều khiển simulation.
+
+Kết quả đo được: Gazebo +3.037 m, EKF +2.980 m, chênh lệch 0.236 m.
+
+### R17 — SITL phục vụ **một** client TCP cho port MAVLink
+
+`UARTDriver::_check_connection()` trong `AP_HAL_SITL/UARTDriver.cpp`:
+
+```cpp
+if (_connected) {
+    // we only want 1 connection at a time
+    return;
+}
+```
+
+Nên port 5760 chỉ nhận **một** kết nối TCP. MAVProxy đã giữ port này thì
+mọi tool khác (monitor, compare) đều không vào được.
+
+Hệ quả trực tiếp: **không được chạy monitor khi cần MAVProxy**. Monitor
+cũng từng làm MAVProxy mất kết nối (`link 1 down`), kéo theo Mission
+Planner rớt luôn.
+
+Giải pháp: mọi tool đọc MAVLink đều đi qua **UDP output của MAVProxy**:
+
+| Port | Dùng cho |
+|---|---|
+| 14550 | MAVROS, và các tool verify |
+| 14551 | Mission Planner / QGroundControl |
+
+MAVProxy tạo output với `input=False` (chỉ gửi đi, không bind), nên Mission
+Planner phải tự bind UDP server trên 14551 — đúng cách Mission Planner
+kết nối tới `UDP (copter)` với port 14551.
+
+### R18 — MAVLink command phải dùng `target_component = 1`
+
+Heartbeat được broadcast với component 0, nên `mav.target_component` là 0.
+Lệnh gửi tới component 0 bị bỏ qua. Phải dùng `MAV_COMP_ID_AUTOPILOT1`
+(= 1) cho `command_long_send`.
+
+### R19 — SITL không có RC input: cần RC override, và throttle phải ở mức tối thiểu
+
+SITL không có joystick, nên throttle = 0. ArduPilot **disarm** drone khi
+throttle về 0, và **từ chối đổi mode** với thông báo *"throttle too high"*
+nếu throttle cao.
+
+Kịch bản hoạt động được:
+
+1. `RC_CHANNELS_OVERRIDE` với ch1 (throttle) = **1000**, ch4 (arm) = 2000.
+   Phải gửi **liên tục** trong suốt chuyến bay, nếu không drone disarm.
+2. `MAV_CMD_DO_SET_MODE` **trước khi arm** (base_mode=1, custom_mode=4).
+3. Arm, rồi `MAV_CMD_NAV_TAKEOFF`.
+
+### R20 — QoS của publisher `/uwb/pose` phải khớp subscriber
+
+`pozyx_node` publish `/uwb/pose`. Nếu publish bằng QoS mặc định (RELIABLE)
+mà subscriber dùng BEST_EFFORT thì **không nhận được gì** — subscriber
+đơn giản là không bao giờ thấy topic.
+
+Bản sửa: publisher dùng cùng `QoSProfile` BEST_EFFORT với subscription
+đầu vào. Đây là lý do `compare_positions.py` báo `trilateration: 0` trong
+khi `ros2 topic hz /uwb/pose` vẫn ra 20 Hz.
+
+---
+
 ## 7. Đánh giá mức độ khả thi
 
 **Kết luận: khả thi, đúng kiến trúc, không cần sửa ArduPilot.**
@@ -622,22 +714,67 @@ GPS2_TYPE 0
 ## 10. Cấu trúc package mới
 
 ```
-src/uwb_pozyx_bridge/              ← package MỚI (thay uwb_bridge cũ)
+src/uwb_pozyx_bridge/              ← package chính
 ├── uwb_pozyx_bridge/
 │   ├── pozyx_protocol.py          ← encode 3 message type (pure, testable)
 │   ├── pozyx_sender.py            ← TCP/UDP transport + reconnect
 │   ├── pozyx_node.py              ← node chính: subscribe + trilaterate + send
 │   └── trilateration.py           ← WLS solver (port từ nhánh cũ)
 ├── config/
-│   └── beacon.parm                ← param chuẩn ArduPilot
+│   └── x500_uwb.parm              ← SITL params hợp nhất (x500 + beacon)
 ├── launch/
-│   └── uwb_pozyx_sitl.launch.py
+│   └── x500_uwb_runway.launch.py  ← launch chính, kế thừa x500_runway
+├── tools/
+│   ├── compare_positions.py       ← gate: 3 nguồn vị trí khớp nhau
+│   ├── verify_fdm_coupling.py     ← gate: SITL thực sự điều khiển Gazebo
+│   ├── sitl_beacon_monitor.py     ← set params runtime (không dùng mặc định)
+│   ├── inspect_frames.py          ← gate 5.2 frame mapping
+│   └── run_pipeline_verify.sh     ← chạy cả 3 gate một lần
 ├── test/
 │   └── test_pozyx_protocol.py     ← unit test byte layout
 ├── package.xml
 ├── setup.cfg
 └── setup.py
 ```
+
+### Params hợp nhất
+
+`config/x500_uwb.parm` gộp ba nguồn, theo thứ tự sau (file sau thắng file trước):
+
+1. `ardupilot/Tools/autotest/default_params/copter.parm` — mặc định copter
+2. `ardupilot_gazebo/config/gazebo-x500.parm` — tuning x500, PID, frame
+3. Beacon params (BCN_*, EK3_SRC1_*, GPS off, SERIAL1_PROTOCOL=13)
+
+SITL nhận nhiều file qua `--defaults` phân tách bằng dấu phẩy
+(`AP_Param::load_defaults_file()` tách bằng `strtok_r` trên `,`).
+
+Hai điểm khác biệt so với `beacon.parm` cũ:
+
+- `ARMING_CHECK 0` thay vì `1048567`. Bộ x500 vốn đã tắt toàn bộ pre-arm
+  check, nên giá trị 0 khớp với baseline. Giá trị cũ chỉ xóa bit "GPS
+  lock" nhưng vẫn giữ INS/compass/RC — chặt hơn baseline và không cần.
+- `FLTMODE1..6` đều trỏ tới `4` (GUIDED). Bản gốc map sang Circle, Land,
+  RTL, Auto, Loiter, Stabilise. **Auto không arm được từ GCS** và **Land
+  disarm ngay**, nên không thể cất cánh bằng MAVLink. GUIDED arm được và
+  là mode đúng cho GCS.
+
+### Launch file
+
+`launch/x500_uwb_runway.launch.py` **kế thừa** `ardupilot_gz_bringup/x500_runway.launch.py`
+thay vì viết lại. Nhờ vậy có sẵn Gazebo GUI, RViz, các bridge Gazebo↔ROS,
+MAVROS (tắt mặc định) và MAVProxy.
+
+Các thay đổi trong submodule `src/ardupilot_gz`:
+
+| File | Thay đổi |
+|---|---|
+| `launch/robots/robot.launch.py` | Thêm launch arg `serial0..serial9`, forward sang SITL |
+| `launch/robots/x500.launch.py` | Khai báo và forward `serial0..serial9` |
+| `launch/x500_runway.launch.py` | Thêm launch arg `world`, `x/y/z/R/P/Y`, `defaults`, `use_mavros`; forward xuống robot |
+
+SITL cần `--model json` để nối FDM port 9002 với `ArduPilotPlugin` trong
+`x500_with_ardupilot`. Vehicle phải spawn model **có** ArduPilotPlugin
+(`x500_with_ardupilot`), không phải `x500_base` — xem R16.
 
 ### Tái dùng / loại bỏ từ nhánh `feat/uwb-odometry`
 
@@ -656,6 +793,74 @@ src/uwb_pozyx_bridge/              ← package MỚI (thay uwb_bridge cũ)
 
 ## 11. Danh sách kiểm tra verify
 
+### Chạy tự động (khuyến nghị)
+
+```bash
+cd ~/ros2_project/AerialVehicleControl
+bash src/uwb_pozyx_bridge/tools/run_pipeline_verify.sh
+```
+
+Script tự launch toàn bộ stack và chạy 3 gate:
+
+| Gate | Kiểm tra | Tool |
+|---|---|---|
+| 1 | Ba nguồn vị trí khớp nhau | `compare_positions.py` |
+| 2 | SITL thực sự điều khiển Gazebo | `verify_fdm_coupling.py` |
+| 3 | MAVProxy forward tới UDP 14550/14551 | inline |
+
+Kết quả mong đợi:
+
+```
+=== summary ===
+  FDM coupling : PASSED
+  positions    : PASSED
+  GCS link     : PASSED
+
+PIPELINE: PASSED
+```
+
+### Chạy tay
+
+```bash
+# 1. Launch toàn bộ stack (Gazebo GUI + RViz + SITL + UWB)
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch uwb_pozyx_bridge x500_uwb_runway.launch.py
+```
+
+Trong terminal khác:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+# Ranging từ Gazebo: 4 anchor × 20 Hz
+ros2 topic hz /uwb/ranging_ros
+
+# Vị trí trilateration
+ros2 topic echo /uwb/pose --once
+
+# Vị trí thật trong Gazebo
+ros2 topic echo /uwb/tag_pose_ros --once
+
+# EKF dùng beacon
+ros2 topic echo /mavros/...   # chỉ khi use_mavros:=true
+```
+
+Mission Planner: chạy `mono ~/Downloads/MissionPlanner-latest/MissionPlanner.exe`,
+chọn **UDP (copter)** với port **14551**.
+
+### Checklist thủ công
+
+- [ ] SITL log có `JSON control interface set to 127.0.0.1:9002`
+- [ ] Gazebo log có `Loaded system [ArduPilotPlugin]` và `Computed IMU topic`
+- [ ] MAVProxy log có `EKF3 IMU0 is using range beacons`
+- [ ] `pozyx_node` log có `tx: solutions=N` tăng đều, `dropped=0`
+- [ ] `ros2 topic hz /uwb/ranging_ros` ra ~80 Hz (4 anchor × 20 Hz)
+- [ ] `ros2 topic hz /uwb/pose` ra ~20 Hz
+- [ ] UDP 14550 và 14551 đều có heartbeat
+- [ ] Drone cất cánh được: Gazebo và EKF cùng lên (~3 m)
+
 ### Tier 2
 - [ ] SITL khởi động, `param show BCN_TYPE` = 1
 - [ ] `param show EK3_SRC1_POSXY` = 4
@@ -665,7 +870,7 @@ src/uwb_pozyx_bridge/              ← package MỚI (thay uwb_bridge cũ)
 - [ ] Sau ~3s: EKF không báo "stopped aiding"
 
 ### Tier 4
-- [ ] `/uwb/ranging/ros` có data (4 anchor × 20 Hz)
+- [ ] `/uwb/ranging_ros` có data (4 anchor × 20 Hz)
 - [ ] Vị trí trilateration khớp vị trí thật của drone trong Gazebo
 - [ ] EKF position khớp trilateration trong ~0.5 m
 

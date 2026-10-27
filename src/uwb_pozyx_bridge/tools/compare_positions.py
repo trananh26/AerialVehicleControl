@@ -101,14 +101,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--trilateration-tolerance", type=float, default=0.3
     )
+    parser.add_argument(
+        "--udp-port",
+        type=int,
+        default=0,
+        help=(
+            "Read the MAVLink stream from a MAVProxy UDP output on this "
+            "port instead of connecting to SITL directly.  SITL's MAVLink "
+            "port serves a single TCP client, and MAVProxy already holds "
+            "it, so the direct connection only works when MAVProxy is not "
+            "running."
+        ),
+    )
     args = parser.parse_args(argv)
 
     rclpy.init(args=None)
     node = PositionCollector()
 
-    mav = mavutil.mavlink_connection(
-        f"tcp:{args.host}:{args.mavlink_port}", robust_parsing=True
-    )
+    if args.udp_port:
+        mav = mavutil.mavlink_connection(
+            f"udpin:0.0.0.0:{args.udp_port}",
+            source_system=255,
+            source_component=0,
+        )
+    else:
+        mav = mavutil.mavlink_connection(
+            f"tcp:{args.host}:{args.mavlink_port}", robust_parsing=True
+        )
     mav.wait_heartbeat(timeout=30)
     print(f"[compare] heartbeat from system {mav.target_system}")
 
