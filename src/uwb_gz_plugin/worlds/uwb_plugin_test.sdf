@@ -1,0 +1,77 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="uwb_plugin_test">
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands">
+    </plugin>
+    <!-- Gives every entity a WorldPose component. -->
+    <plugin filename="gz-sim-pose-publisher-system"
+            name="gz::sim::systems::PosePublisher">
+      <publish_link_pose>true</publish_link_pose>
+      <publish_model_pose>true</publish_model_pose>
+      <publish_world_pose>true</publish_world_pose>
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+
+    <!-- 4 anchors in 10x10 square -->
+    <include>
+      <uri>model://uwb_anchor</uri>
+      <name>uwb_anchor0</name>
+      <pose>0 0 2 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://uwb_anchor</uri>
+      <name>uwb_anchor1</name>
+      <pose>10 0 2 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://uwb_anchor</uri>
+      <name>uwb_anchor2</name>
+      <pose>10 10 2 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://uwb_anchor</uri>
+      <name>uwb_anchor3</name>
+      <pose>0 10 2 0 0 0</pose>
+    </include>
+
+    <!-- "tag" model: a simple moving box that has the UWB plugin attached -->
+    <model name="uwb_tag_box">
+      <pose>5 5 1 0 0 0</pose>
+      <link name="base_link">
+        <visual name="v">
+          <geometry><box><size>0.4 0.4 0.2</size></box></geometry>
+        </visual>
+        <collision name="c">
+          <geometry><box><size>0.4 0.4 0.2</size></box></geometry>
+        </collision>
+        <inertial>
+          <mass>1.0</mass>
+          <inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia>
+        </inertial>
+      </link>
+      <plugin filename="uwb_gz_plugin"
+              name="uwb_gz_plugin::systems::UwbSystem">
+        <update_rate>25.0</update_rate>
+        <tag_id>0</tag_id>
+        <tag_link>base_link</tag_link>
+        <anchor_prefix>uwb_anchor</anchor_prefix>
+        <all_los>true</all_los>
+        <max_range>50.0</max_range>
+        <los_std>0.05</los_std>
+
+        <!-- <pos> is a child element, not an attribute. -->
+        <anchor name="uwb_anchor0"><pos>0 0 2.0</pos></anchor>
+        <anchor name="uwb_anchor1"><pos>10 0 2.0</pos></anchor>
+        <anchor name="uwb_anchor2"><pos>10 10 2.0</pos></anchor>
+        <anchor name="uwb_anchor3"><pos>0 10 2.0</pos></anchor>
+      </plugin>
+    </model>
+
+  </world>
+</sdf>

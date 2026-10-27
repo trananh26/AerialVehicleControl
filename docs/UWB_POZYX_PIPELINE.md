@@ -441,6 +441,62 @@ _frontend.beacon_state[beacon_instance].healthy = true;
 → Dùng `--serial1=tcp:5761:wait` (SITL chờ connect) hoặc `tcp:5761` (không
 block).
 
+### R10 — Plugin phải tìm link trong model **lồng nhau**
+
+`x500_with_ardupilot` → `<include>` `x500_base` → `<include>` `x500_base`.
+Gazebo bọc mỗi `<include>` trong một model con, nên `base_link` **không** phải
+child trực tiếp của model `x500`.
+
+→ `FindLinkEntity` phải đệ quy vào child model. Nếu không, plugin không tìm
+thấy tag → **ranging rỗng, không có bất kỳ message nào**.
+
+### R11 — Gazebo không cấp `WorldPose` component cho link
+
+`components::Pose` của một link là pose **cục bộ** (luôn = origin). Component
+`WorldPose` chỉ tồn tại nếu world có `gz::sim::systems::PosePublisher`.
+
+→ Plugin tự dồn pose qua chuỗi parent (`_ecm.ParentEntity`) để suy ra world
+pose. Không có bước này, ranging đo **sai hoàn toàn** (tag luôn ở origin).
+
+### R12 — `<pos>` của `<anchor>` là **child element**
+
+```xml
+<!-- SAI: attribute -->
+<anchor name="uwb_anchor0" pos="0 0 2.0"/>
+
+<!-- ĐÚNG -->
+<anchor name="uwb_anchor0"><pos>0 0 2.0</pos></anchor>
+```
+
+→ Dùng sai thì plugin báo `<anchor> without <pos>; skipping` rồi rơi về
+layout hard-coded (trùng vị trí, nên vẫn chạy — nhưng im lặng sai).
+
+### R13 — LOS code **không** được encode thành quaternion roll
+
+`Quaterniond(los, 0, 0)` tạo `orientation.x = sin(los/2)`, nên LOS=1 →
+`0.479` → Python `round()` → 0 → **mất cờ NLOS**.
+
+→ Đặt thẳng `orientation.x = los` (0/1/2) và `orientation.w = 1.0`.
+
+### R14 — Spawn pose phải đặt trên `<include>`
+
+`x500_base/model.sdf` có `<pose>0 0 .025</pose>` riêng, và nested include
+không kế thừa pose của parent. Đặt pose ở `<model>` hoặc field `pose:` của
+`EntityFactory` đều **không có tác dụng**.
+
+```xml
+<!-- ĐÚNG -->
+<model name="x500">
+  <include>
+    <uri>model://x500_base</uri>
+    <pose>5 5 0.1 0 0 0</pose>
+  </include>
+</model>
+```
+
+→ Đã verify: tag ở đúng `(5, 5, 0.104)`, range mỗi anchor 7.30–7.42 m
+(kỳ vọng √(5²+5²+1.9²) = 7.34 m).
+
 ---
 
 ## 7. Đánh giá mức độ khả thi

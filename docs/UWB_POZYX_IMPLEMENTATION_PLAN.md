@@ -53,10 +53,28 @@ Test hiện tại: **24/24 pass**.
 
 | Hạng mục | Phase |
 |---|---|
-| `src/uwb_gz_plugin/**` (port từ nhánh cũ) | 4 |
 | `launch/*.launch.py` | 5 |
 | Nối Gazebo + node + SITL | 5 |
 | Flight test | 6 |
+
+### Đã làm trong Phase 4 ✅
+
+| Hạng mục | Ghi chú |
+|---|---|
+| `src/uwb_gz_plugin/**` | Port từ `origin/feat/uwb-odometry`, **không** giữ `x500_with_uwb` (Q2) |
+| `src/UwbSystem.cc` | 4 sửa đổi (tìm link lồng nhau, world pose chain, LOS encoding) |
+| `src/ros_gz_bridge_node.cc` | Tách callback ranging / tag pose |
+| `worlds/uwb_runway.sdf` | `<anchor>` tường minh + `PosePublisher` system |
+| `tools/run_phase4_verify.sh` | Script verify Gazebo side |
+
+**Kết quả Phase 4: PASS**
+- `colcon build` ✅
+- Plugin load, 3 topic `/uwb/*` ✅
+- Anchor đúng vị trí ✅
+- Tag spawn đúng `(5, 5, 0.104)` ✅
+- Ranging đúng toán học: **7.30–7.42 m** vs kỳ vọng **7.34 m** ✅
+- Bridge publish `/uwb/ranging_ros` với encoding chuẩn ✅
+
 
 ### Đã làm trong Phase 3 ✅
 
@@ -198,15 +216,30 @@ Port **nguyên vẹn**, chỉ sửa tối thiểu:
 
 | File | Sửa gì |
 |---|---|
-| `src/UwbSystem.cc` | Giữ nguyên |
+| `src/UwbSystem.cc` | **4 sửa đổi** — xem bảng bên dưới |
 | `src/UwbRanging.cc` | Giữ nguyên |
-| `src/ros_gz_bridge_node.cc` | Giữ nguyên (bắt buộc — `ros_gz_bridge` factory-lookup failure) |
-| `include/uwb_gz_plugin/*.hh` | Giữ nguyên |
-| `CMakeLists.txt` | Kiểm tra deps khớp GZ 8.11 (đã xác minh) |
+| `src/ros_gz_bridge_node.cc` | **Tách callback** ranging / tag pose (xem bên dưới) |
+| `include/uwb_gz_plugin/*.hh` | Thêm khai báo `LocalToWorldPose` |
+| `CMakeLists.txt` | Giữ nguyên (đã nhắm đúng GZ 8.11) |
 | `models/uwb_anchor/**` | Giữ (để visualize anchor) |
 | `models/x500_with_uwb/**` | **BỎ** — dùng `x500_with_ardupilot` có sẵn (Q2) |
 | `worlds/uwb_runway.sdf` | Sửa (xem 4.2) |
 | `worlds/uwb_plugin_test.sdf` | Sửa tương tự |
+
+#### 4.1.1 Bốn sửa đổi trong `UwbSystem.cc`
+
+| # | Vấn đề | Sửa |
+|---|---|---|
+| 1 | `FindLinkEntity` chỉ tìm link **trực tiếp** của model. Với `x500_with_ardupilot` (include `x500_base` → include `x500_base` lồng nhau), `base_link` nằm ở model **con** nên không tìm thấy → ranging không publish | Đệ quy vào child model |
+| 2 | Đọc **local pose** của link (luôn = 0,0,0) thay vì world pose. Gazebo không tạo `WorldPose` component trừ khi có `PosePublisher` system | Thêm `LocalToWorldPose()`: dồn `Pose` qua chuỗi parent (`_ecm.ParentEntity`) |
+| 3 | `<anchor>` trong SDF phải có `<pos>` là **child element**, không phải attribute | Sửa world (4.2) |
+| 4 | LOS code đưa vào `Quaterniond(los, 0, 0)` → `orientation.x = sin(los/2)` = 0.479, Python `round()` về 0 → **mất cờ NLOS** | Đặt thẳng `orientation.x = los`, `orientation.w = 1.0` |
+
+#### 4.1.2 Sửa trong `ros_gz_bridge_node.cc`
+
+`OnPose` dùng chung cho cả ranging và tag pose → tag pose **lẫn** vào topic ranging
+(đọc được `position.z = 0.11` thay vì anchor id). Tách thành `OnRanging` và
+`OnTagPose`.
 
 ### 4.2 `uwb_runway.sdf` — sửa cho Q1
 
@@ -221,25 +254,53 @@ Dùng **`<anchor>` tường minh** (plugin hỗ trợ, ưu tiên hơn include mo
   <all_los>true</all_los>
   <max_range>50.0</max_range>
   <los_std>0.05</los_std>
-  <anchor_prefix>uwb_anchor</anchor_prefix>
-  <anchor name="uwb_anchor0" pos="0 0 2"/>
-  <anchor name="uwb_anchor1" pos="10 0 2"/>
-  <anchor name="uwb_anchor2" pos="10 10 2"/>
-  <anchor name="uwb_anchor3" pos="0 10 2"/>
+
+  <!-- <pos> là CHILD ELEMENT, không phải attribute -->
+  <anchor name="uwb_anchor0"><pos>0 0 2.0</pos></anchor>
+  <anchor name="uwb_anchor1"><pos>10 0 2.0</pos></anchor>
+  <anchor name="uwb_anchor2"><pos>10 10 2.0</pos></anchor>
+  <anchor name="uwb_anchor3"><pos>0 10 2.0</pos></anchor>
 </plugin>
 ```
 
 - `spherical_coordinates` giữ nguyên (`-35.3632621, 149.1652374`) → khớp SITL home
 - Không include drone (spawn runtime)
+- Thêm `gz-sim-pose-publisher-system` (xem 4.1.1 #2)
 
-### 4.3 Test cho Phase 4
+### 4.3 ⚠️ Spawn pose: `<pose>` phải nằm trên `<include>`
 
-- [ ] `colcon build` plugin thành công
-- [ ] `gz sim -r -s uwb_runway.sdf` chạy, không lỗi load plugin
-- [ ] Log GZ hiện: `Explicit anchor 'uwb_anchor0' at (0, 0, 2)` × 4
-- [ ] `gz topic -l` thấy `/uwb/ranging/tag`
-- [ ] Bridge node publish `/uwb/ranging_ros`, `ros2 topic echo` thấy 4 anchor × 20 Hz
-- [ ] Giá trị decode đúng: `position.x` = range (m), `position.z` = anchor_id
+Đây là điểm dễ sai nhất. Ba cách đặt pose đều **không** cho kết quả mong muốn:
+
+| Cách | Kết quả |
+|---|---|
+| `<model><pose>5 5 0.1</pose><include/></model>` | ❌ model ở (0,0,0.1) — `x500_base` có `<pose>0 0 .025</pose>` riêng ghi đè |
+| `EntityFactory` request field `pose:` | ❌ bị bỏ qua |
+| `ros2 run ros_gz_sim create -pose 5,5,0.1` | ❌ tạo model ở (0,0,0) |
+| **`<model><include><pose>5 5 0.1</pose></include></model>`** | ✅ **(5, 5, 0.104)** |
+
+Cách đúng (đã verify):
+
+```bash
+gz service -s /world/uwb_runway/create \
+  --reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean \
+  --req 'name: "x500", sdf: "<sdf version=\"1.9\"><model name=\"x500\"><include><uri>model://x500_base</uri><pose>5 5 0.1 0 0 0</pose></include></model></sdf>"'
+```
+
+> Tên model **phải** là `x500` (khớp `<tag_model_name>`), nếu khác thì plugin
+> không tìm thấy tag và ranging rỗng.
+
+### 4.4 Test cho Phase 4
+
+- [x] `colcon build` plugin thành công
+- [x] `gz sim -r -s uwb_runway.sdf` chạy, plugin load không lỗi
+- [x] Log GZ hiện: `Explicit anchor 'uwb_anchor0' at (0, 0, 2)` × 4
+- [x] `gz topic -l` thấy `/uwb/ranging/tag`
+- [x] Bridge node publish `/uwb/ranging_ros`
+- [x] Giá trị decode đúng: `position.x` = range (m), `position.z` = anchor_id
+- [x] **Range khớp toán học**: tag ở tâm → range = √(5² + 5² + 1.9²) = **7.34 m**
+      (đo được 7.30–7.42 m, chênh do nhiễu `los_std = 0.05`)
+
+Script: `src/uwb_gz_plugin/tools/run_phase4_verify.sh`
 
 ---
 
@@ -354,4 +415,5 @@ ArduPilot (NED, m)        ← EKF làm việc ở đây
 | 2026-10-26 | Tier 2 | ✅ PASS | `EKF3 IMU0 is using range beacons`; phát hiện unit bug R2 |
 | 2026-10-26 | Tier 1 | ✅ PASS | 24/24 unit test |
 | 2026-10-27 | **Phase 3** | ✅ **PASS** | 35/35 test; `colcon build` OK; SITL + node + fake source → "is using range beacons", "initial pos NE = -0.0,0.0" |
+| 2026-10-27 | **Phase 4** | ✅ **PASS** | Plugin port + build OK; ranging 7.30–7.42 m (kỳ vọng 7.34 m); 4 bug fix (xem 4.1.1) |
 | | | | |
