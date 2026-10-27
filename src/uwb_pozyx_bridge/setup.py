@@ -13,6 +13,19 @@ setup(
         ),
         ("share/" + package_name, ["package.xml"]),
         ("share/" + package_name + "/config", ["config/beacon.parm"]),
+        (
+            "share/" + package_name + "/launch",
+            ["launch/uwb_pozyx_sitl.launch.py"],
+        ),
+        (
+            "share/" + package_name + "/tools",
+            [
+                "tools/sitl_beacon_monitor.py",
+                "tools/compare_positions.py",
+                "tools/inspect_frames.py",
+                "tools/fake_ranging_source.py",
+            ],
+        ),
     ],
     install_requires=["setuptools", "numpy"],
     zip_safe=True,

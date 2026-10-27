@@ -309,9 +309,72 @@ Script: `src/uwb_gz_plugin/tools/run_phase4_verify.sh`
 **Mục tiêu:** drone bay trong Gazebo, EKF3 dùng UWB làm nguồn vị trí.
 **Ước lượng:** 1–1.5 ngày · **Rủi ro:** Cao (frame mapping)
 
-### 5.1 Điểm khó: frame mapping
+> Phase này được tách thành **5 step nhỏ**. Mỗi step có **gate verify riêng**
+> và phải **DỪNG LẠI** sau khi verify — không được sang step kế tiếp khi
+> gate chưa xanh.
 
-Ba hệ toạ độ phải khớp:
+| Step | Nội dung | Rủi ro | Cổng |
+|---|---|---|---|
+| **5.1** | Gazebo → ROS 2 (bridge) | Thấp | Ranging đúng, 4 anchor, 20 Hz |
+| **5.2** | ROS 2 → beacon-relative → Pozyx frame | Trung bình | Frame mapping đúng, khớp toán học |
+| **5.3** | Pozyx frame → ArduPilot SITL | Trung bình | EKF "origin set" + "is using range beacons" |
+| **5.4** | Ba nguồn vị trí khớp nhau | Cao | Gazebo truth ≈ EKF ≈ trilateration |
+| **5.5** | Launch file tổng hợp | Thấp | `ros2 launch` một lệnh chạy trọn vẹn |
+
+**Nguyên tắc:** mỗi step giả định step trước đã xanh, và **chỉ thêm đúng một
+thứ**. Nếu gate đỏ → sửa step hiện tại, không đi tiếp.
+
+**Trạng thái: cả 5 step đã PASS ✅**
+
+| Step | Kết quả | Sai số chính |
+|---|---|---|
+| 5.1 | PASS | 19.9 Hz/anchor, range 7.30–7.31 m (kỳ vọng 7.34) |
+| 5.2 | PASS | trilateration sai **0.027 m**; offset `(±5000, ±5000, +1900)` mm |
+| 5.3 | PASS | `frames_sent=1201 dropped=0`, EKF flags `0x033f` healthy |
+| 5.4 | PASS | EKF vs truth **0.189 m**, drift **0.004 m** |
+| 5.5 | PASS | EKF vs truth **0.069 m**, drift **0.008 m** |
+
+---
+
+### Step 5.1 — Gazebo → ROS 2 (bridge)
+
+**Mục tiêu:** xác nhận dữ liệu ranging từ Gazebo đi qua bridge vào ROS 2 với
+encoding đúng, **chưa** đụng tới ArduPilot.
+
+**Thay đổi:** không sửa code. Chỉ chạy Gazebo + bridge node.
+
+**Cách chạy:**
+```bash
+# terminal 1
+gz sim -r -s uwb_runway.sdf
+# terminal 2
+ros2 run ros_gz_sim create -topic /world/uwb_runway -name x500 \
+  -file model://x500_base   # spawn tại trọng tâm, xem Step 5.2
+ros2 run uwb_gz_plugin uwb_gz_to_ros_bridge
+```
+
+**Gate 5.1 — phải xanh trước khi sang 5.2:**
+
+- [x] `ros2 topic list` thấy `/uwb/ranging_ros` và `/uwb/tag_pose_ros`
+- [x] Tần suất **19.9 Hz/anchor** (79.6 Hz tổng cho 4 anchor) — plugin publish
+      1 message/anchor/cycle
+- [x] Mỗi message: `position.x` = range (7.30–7.31 m), `position.z` = anchor_id
+      (0,1,2,3), `position.y` = RSS (−67.3 dBm), `orientation.x` = LOS (0)
+- [x] `/uwb/tag_pose_ros` = (5.000, 5.000) — vị trí thật của drone
+- [x] **Không** có message lẫn từ `tag_pose` vào `ranging_ros`
+      (range spread chỉ 0.269 m)
+
+**Công cụ gate:** `src/uwb_gz_plugin/tools/check_ranging_stream.py`
+(chạy tự động, exit code khác 0 nếu fail)
+**Script:** `src/uwb_gz_plugin/tools/run_step51_verify.sh`
+
+---
+
+### Step 5.2 — ROS 2 → beacon-relative → Pozyx frame
+
+**Mục tiêu:** kiểm tra frame mapping ở **phía node**, chưa gửi gì đi.
+
+**Các hệ toạ độ phải khớp:**
 
 ```
 Gazebo world (ENU, m)     ← anchor ở đây, drone spawn ở đây
@@ -323,39 +386,219 @@ Pozyx wire (mm, ENU)      ← những gì node gửi
 ArduPilot (NED, m)        ← EKF làm việc ở đây
 ```
 
-**Checklist khớp:**
-- [ ] `anchor_positions` (mm) = anchor world − (5, 5, 0.1) × 1000
-- [ ] `z` dương khi anchor **cao hơn** origin
-- [ ] Tag position: `x,y` từ trilateration, `z` = `tag_altitude` (0)
-- [ ] `BCN_LATITUDE/LONGITUDE/ALT` = SITL home (đã có trong `beacon.parm`)
-- [ ] `BCN_ORIENT_YAW 0` (Gazebo world không xoay)
+**Thay đổi:** thêm công cụ `tools/inspect_frames.py` — subscribe `/uwb/ranging_ros`,
+in ra:
+- range thô từ Gazebo
+- anchor offset tương đối beacon origin (mm)
+- vị trí tag sau trilateration (m và mm)
+- frame Pozyx sẽ gửi (byte-level, hex)
 
-### 5.2 Launch file
+**Checklist frame mapping:**
+- [x] `anchor_offsets_mm` = anchor world − (5, 5, 0.1) × 1000
+      → `(±5000, ±5000, +1900)`
+- [x] `z` **dương** khi anchor **cao hơn** origin (anchor ở z=2.0, origin z=0.1)
+- [x] Tag position: `x,y` từ trilateration, `z` = `tag_altitude` (0)
+- [x] `BCN_ORIENT_YAW 0` (Gazebo world không xoay)
 
-`launch/uwb_pozyx_sitl.launch.py`:
-- Launch `uwb_runway.sdf`
-- Spawn `x500_with_ardupilot` tại `(-5.5, -5.5, 0.1)`?
+**Gate 5.2:**
+- [x] Vị trí tag sau trilateration ≈ `(0, 0)` m khi drone ở tâm
+      (vì beacon origin **chính là** điểm spawn)
+- [x] Sai số trilateration vs vị trí thật = **0.027 m** (< 0.3 m) ✅
+- [x] `anchor_offsets_mm` in ra đúng `(±5000, ±5000, +1900)`, khớp default
+      của node
+- [x] Frame Pozyx dựng lại **giống hệt** byte mà node sẽ gửi
+- [x] `position_error` trong frame = **0** (mét, workaround R2)
 
-> ⚠️ **Lưu ý vị trí spawn**: `x500.launch.py` của `ardupilot_gz_bringup` spawn drone tại vị trí mặc định.
-> Cần override để đặt đúng `(5, 5, 0.1)`.
+**Kết quả thực tế:**
 
-### 5.3 Test cho Phase 5
+```
+=== anchor offsets (beacon-relative, mm) ===
+  anchor 0: (-5000, -5000, +1900)
+  anchor 1: (+5000, -5000, +1900)
+  anchor 2: (+5000, +5000, +1900)
+  anchor 3: (-5000, +5000, +1900)
+  -> matches the node's default anchor_offsets_mm
 
-- [ ] Gazebo chạy, drone spawn đúng `(5, 5, 0.1)` — verify bằng `gz model --list` / topic pose
-- [ ] `/uwb/ranging_ros` có data, range hợp lý (anchor cách drone ~7 m khi ở tâm)
-- [ ] Node gửi frame, SITL nhận
-- [ ] EKF log: `is using range beacons` + `origin set`
-- [ ] **Vị trí EKF khớp vị trí thật của drone trong Gazebo** trong ~0.5 m
-- [ ] **Vị trí EKF khớp trilateration** (publish `/uwb/pose`) trong ~0.3 m
-- [ ] So sánh 2 nguồn: Gazebo truth vs EKF vs trilateration — cả 3 phải gần nhau
+=== tag position ===
+  trilateration (beacon-relative, m): (0.019, -0.019, 0.000)
+  Gazebo truth   (beacon-relative, m): (0.000, 0.000)
+  horizontal error: 0.027 m
 
-### 5.4 Công cụ so sánh
+=== Pozyx frames that would be sent ===
+  msg 0x02  payload 00 04 78 ec ff ff 78 ec ff ff 6c 07 00 00   ← config 0
+  msg 0x02  payload 01 04 88 13 00 00 78 ec ff ff 6c 07 00 00   ← config 1
+  msg 0x02  payload 02 04 88 13 00 00 88 13 00 00 6c 07 00 00   ← config 2
+  msg 0x02  payload 03 04 78 ec ff ff 88 13 00 00 6c 07 00 00   ← config 3
+  msg 0x03  payload 00 b3 1c 00 00                              ← dist 0 = 7347 mm
+  msg 0x03  payload 01 87 1c 00 00                              ← dist 1 = 7319 mm
+  msg 0x03  payload 02 b4 1c 00 00                              ← dist 2 = 7348 mm
+  msg 0x03  payload 03 bb 1c 00 00                              ← dist 3 = 7355 mm
+  msg 0x04  payload 13 00 00 00 ed ff ff ff 00 00 00 00 00 00   ← pos, err=0
+```
 
-`tools/compare_positions.py`:
-- Đọc `/uwb/pose` (trilateration)
-- Đọc gz topic pose của drone (Gazebo truth)
-- Đọc `LOCAL_POSITION_NED` (EKF) qua MAVLink
-- In bảng so sánh + sai số
+**Công cụ gate:** `src/uwb_pozyx_bridge/tools/inspect_frames.py`
+
+---
+
+### Step 5.3 — Pozyx frame → ArduPilot SITL
+
+**Mục tiêu:** SITL thật nhận frame từ node và EKF3 fuse beacon.
+
+**Thay đổi:** chạy SITL với `config/beacon.parm` + node gửi thật. Chưa cần
+drone bay — vẫn dùng Gazebo làm nguồn ranging.
+
+**Cách chạy:**
+```bash
+arducopter --model x500 --defaults config/beacon.parm --serial1=tcp:5761:wait
+python3 tools/sitl_beacon_monitor.py --set-params
+ros2 run uwb_pozyx_bridge pozyx_node
+```
+
+**Gate 5.3:**
+- [x] SITL log: `EKF3 IMU0 origin set`
+- [x] SITL log: `EKF3 IMU0 is using range beacons`
+- [x] SITL log: `EKF3 IMU0 initial pos NE = -0.0,0.0 (m)`
+- [x] SITL log: `EKF3 IMU0 initial beacon pos D offset = 0.1 (m)`
+- [x] `ekf_status` flags = `0x033f` — có `PosHRel` + `PosHAbs`,
+      **không còn** `UNINITIALIZED`
+- [x] Node log: `frames_sent=1201 dropped=0` (không rơi frame nào)
+
+**Kết quả thực tế:**
+
+```
+############ GATE CHECK ############
+  [OK ] EKF3 origin set
+  [OK ] EKF3 is using range beacons
+  [OK ] initial pos NE is ~0
+  [OK ] beacon pos D offset is 0.1
+  [OK ] node frames_sent=1201 dropped=0
+  [OK ] final EKF flags 0x033f (healthy)
+
+STEP 5.3 GATE: PASSED
+```
+
+> **Hai lưu ý khi đọc log:**
+> 1. `EKF_UNINITIALIZED` = **1024** (bit 10), không phải bit 8.
+> 2. Các dòng `is using range beacons` / `initial pos NE` xuất hiện **vào
+>    cuối** run, nên gate phải retry thay vì đọc log một lần.
+
+> Nếu `origin set` có mà `is using range beacons` **không** có →
+> kiểm tra `EK3_SRC1_POSZ` = 1 (Baro), xem R2b.
+
+**Công cụ gate:** `src/uwb_pozyx_bridge/tools/run_step53_verify.sh`
+
+---
+
+### Step 5.4 — Ba nguồn vị trí khớp nhau
+
+**Mục tiêu:** xác nhận EKF đang ở đúng chỗ, không chỉ "đang chạy".
+
+**Thay đổi:** thêm `tools/compare_positions.py` — đọc song song:
+- `/uwb/pose` (trilateration của node)
+- Gazebo truth (gz topic pose của model `x500`)
+- `LOCAL_POSITION_NED` (EKF) qua MAVLink
+
+In bảng + sai số theo thời gian.
+
+**Gate 5.4:**
+- [x] |EKF − Gazebo truth| = **0.189 m** (< 0.5 m) ✅
+- [x] |EKF − trilateration| = **0.180 m** (< 0.3 m) ✅
+- [x] |trilateration − Gazebo truth| = **0.092 m** (< 0.3 m) ✅
+- [x] Sai số **ổn định**: drift = **0.004 m**, worst error = 0.197 m
+
+**Kết quả thực tế:**
+
+```
+=== sample counts ===
+  truth (Gazebo)  : 122
+  trilateration   : 122
+  ekf             : 138
+
+=== latest positions (beacon-relative ENU metres) ===
+  truth       : (+0.000, +0.000, +0.093)
+  trilateration: (+0.086, +0.034, +0.000)
+  ekf         : (+0.124, -0.142, -0.082)
+
+=== horizontal errors ===
+  ekf vs truth                 = 0.189 m
+  ekf vs trilateration         = 0.180 m
+  trilateration vs truth       = 0.092 m
+
+=== stability ===
+  drift over the run: 0.004 m
+  worst ekf vs truth: 0.197 m
+
+STEP 5.4 GATE: PASSED
+```
+
+> **Lưu ý về trục z**: cổng so sánh chỉ kiểm tra **mặt phẳng ngang**. Trục
+> đứng có ambiguity vì 4 anchor cùng phẳng (xem R2b), nên EKF dùng Baro cho
+> z. Giá trị z chỉ mang tính chỉ báo.
+
+**Công cụ gate:** `src/uwb_pozyx_bridge/tools/compare_positions.py`
+**Script:** `src/uwb_pozyx_bridge/tools/run_step54_verify.sh`
+
+> Đây là gate quan trọng nhất của Phase 5. Nếu EKF "dùng beacon" nhưng sai
+> chỗ, thì đó chính là lỗi frame mapping — phải quay lại Step 5.2.
+
+---
+
+### Step 5.5 — Launch file tổng hợp
+
+**Mục tiêu:** gom mọi thứ vào một `ros2 launch` để chạy trọn vẹn.
+
+**Thay đổi:** `src/uwb_pozyx_bridge/launch/uwb_pozyx_sitl.launch.py`:
+- Launch world `uwb_runway.sdf` (GZ Sim)
+- Spawn `x500_with_ardupilot` tại `(5, 5, 0.1)`
+  (> dùng `x500.launch.py` của `ardupilot_gz_bringup` với args `x`/`y`/`z`)
+- Chạy `uwb_gz_to_ros_bridge`
+- Chạy `pozyx_node`
+- (SITL do `x500.launch.py` tự khởi động)
+
+**Gate 5.5:**
+- [x] `ros2 launch uwb_pozyx_bridge uwb_pozyx_sitl.launch.py` chạy trọn vẹn
+- [x] Drone spawn đúng `(5, 5, 0.1)`
+- [x] EKF "is using range beacons"
+- [x] Vị trí khớp truth trong 0.5 m → thực tế **0.069 m**
+- [x] Không cần chạy tay bất kỳ process nào khác
+
+**Kết quả thực tế:**
+
+```
+=== latest positions (beacon-relative ENU metres) ===
+  truth       : (+0.000, +0.000, +0.093)
+  trilateration: (+0.011, -0.015, +0.000)
+  ekf         : (+0.066, -0.019, -0.109)
+
+=== horizontal errors ===
+  ekf vs truth                 = 0.069 m
+  ekf vs trilateration         = 0.055 m
+  trilateration vs truth       = 0.018 m
+
+=== stability ===
+  drift over the run: 0.008 m
+  worst ekf vs truth: 0.085 m
+
+STEP 5.4 GATE: PASSED
+```
+
+**Bốn lỗi đã gặp khi làm Step 5.5** (đều là lỗi launch, không phải lỗi pipeline):
+
+1. **`gz sim -s <name>` không tìm thấy world.** Phải dùng **absolute path**
+   tới file `.sdf`; `GZ_SIM_RESOURCE_PATH` không được quét đệ quy.
+2. **`GZ_SIM_SYSTEM_PLUGIN_PATH` phải trỏ tới thư mục `lib/`.** Trỏ nhầm
+   sang `share/` làm Gazebo không nạp được UWB plugin (không có ranging nào).
+3. **Cú pháp serial của SITL là `tcp:<port>:wait`, KHÔNG có host.**
+   `tcp:127.0.0.1:5761:wait` bị parse thành `port=127` → SITL bind
+   `base_port + 127 = 5887` thay vì 5761.
+4. **SITL chỉ phục vụ MAVLink cho 1 client TCP.** Monitor phải nhả port 5760
+   trước khi công cụ so sánh kết nối → thêm launch arg `monitor_duration`.
+
+> Ngoài ra: node phải khởi động **sau** khi SITL bind SERIAL1 (TimerAction
+> 14 s), nếu không sẽ drop ~40 frame đầu. Và monitor phải chạy `python3 -u`
+> để stdout không bị buffer.
+
+**Công cụ gate:** `src/uwb_pozyx_bridge/tools/run_step55_verify.sh`
 
 ---
 
