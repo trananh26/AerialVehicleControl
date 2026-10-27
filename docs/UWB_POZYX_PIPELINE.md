@@ -499,6 +499,39 @@ không kế thừa pose của parent. Đặt pose ở `<model>` hoặc field `po
 
 ---
 
+### R15 — `PosePublisher` phải attach vào **model**, không phải world
+
+Gazebo log có dòng:
+
+```
+[gz-1] [Err] [PosePublisher.cc:192] PosePublisher plugin should be attached to
+        a model entity. Failed to initialize.
+```
+
+Trong `PosePublisher::Configure()` của Gazebo Harmonic:
+
+```cpp
+this->dataPtr->model = Model(_entity);
+if (!this->dataPtr->model.Valid(_ecm)) {
+  gzerr << "PosePublisher plugin should be attached to a model entity. "
+        << "Failed to initialize." << std::endl;
+  return;   // <- thoát sớm, plugin không hoạt động
+}
+```
+
+Attach ở cấp `<world>` → `Model::Valid()` false → plugin return ngay, **chưa
+bao giờ khởi tạo được**. Đã bỏ hẳn khỏi `uwb_runway.sdf`.
+
+**Lưu ý:** comment cũ trong world SDF nói plugin này *"cần thiết để có
+WorldPose component"* là **sai**. `WorldPose` do **Physics system** ghi cho
+dynamic entity. Thiếu PosePublisher thì UWB plugin rơi về nhánh fallback
+`LocalToWorldPose()` (đi ngược parent chain) — kết quả vẫn đúng.
+
+Đã kiểm chứng bằng cách bỏ plugin: range 7.318–7.324 m, 19.8 Hz/anchor,
+tag pose `(5.000, 5.000)`, EKF beacon vẫn fuse bình thường.
+
+---
+
 ## 7. Đánh giá mức độ khả thi
 
 **Kết luận: khả thi, đúng kiến trúc, không cần sửa ArduPilot.**

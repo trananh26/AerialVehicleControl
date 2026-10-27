@@ -12,15 +12,12 @@
     <plugin filename="gz-sim-user-commands-system"
             name="gz::sim::systems::UserCommands">
     </plugin>
-    <!-- Publishes the WorldPose component for every entity.  The UWB plugin
-         needs world-frame poses; without this system it would only see the
-         link's local pose, which is always the origin. -->
-    <plugin filename="gz-sim-pose-publisher-system"
-            name="gz::sim::systems::PosePublisher">
-      <publish_link_pose>true</publish_link_pose>
-      <publish_model_pose>true</publish_model_pose>
-      <publish_world_pose>true</publish_world_pose>
-    </plugin>
+    <!-- NOTE: no gz-sim-pose-publisher-system here.  That system has to be
+         attached to a model entity; at the world level Gazebo rejects it
+         with "PosePublisher plugin should be attached to a model entity"
+         and it never initialises.  It is not needed anyway: the UWB plugin
+         reads the WorldPose component that the Physics system writes for
+         dynamic entities, and falls back to walking the parent chain. -->
     <plugin filename="gz-sim-scene-broadcaster-system"
             name="gz::sim::systems::SceneBroadcaster">
     </plugin>

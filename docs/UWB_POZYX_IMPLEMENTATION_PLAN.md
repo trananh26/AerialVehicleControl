@@ -602,6 +602,52 @@ STEP 5.4 GATE: PASSED
 
 ---
 
+### R15 — `PosePublisher` không được attach ở cấp world
+
+Log của lần chạy đầu tiên có:
+
+```
+[gz-1] [Err] [PosePublisher.cc:192] PosePublisher plugin should be attached to
+        a model entity. Failed to initialize.
+```
+
+Đây **không phải** lỗi chặn flow, nhưng cũng không phải lỗi vô hại hoàn toàn:
+plugin đó **chưa bao giờ khởi tạo được**. Nguyên nhân nằm trong
+`PosePublisher::Configure()` của Gazebo:
+
+```cpp
+this->dataPtr->model = Model(_entity);
+if (!this->dataPtr->model.Valid(_ecm)) {
+  gzerr << "PosePublisher plugin should be attached to a model entity. "
+        << "Failed to initialize." << std::endl;
+  return;   // <- thoát sớm, không làm gì cả
+}
+```
+
+Ta attach nó ở cấp `<world>`, nên `Model::Valid()` false → return ngay.
+
+**Quan trọng:** comment trong `uwb_runway.sdf` trước đây nói plugin này *"cần
+thiết để có WorldPose component"* là **sai**. `WorldPose` do **Physics
+system** ghi cho dynamic entity, không phải PosePublisher. Nếu thiếu nó,
+UWB plugin rơi về nhánh fallback `LocalToWorldPose()` (đi ngược parent chain)
+vẫn cho kết quả đúng.
+
+Đã **bỏ hẳn** plugin khỏi world SDF, và kiểm chứng:
+
+| | Có PosePublisher | Không PosePublisher |
+|---|---|---|
+| Lỗi Gazebo | có | **không** |
+| Range anchor 0–3 | 7.30–7.31 m | 7.318–7.324 m |
+| Tần suất | 19.9 Hz/anchor | 19.8 Hz/anchor |
+| Tag pose | (5.000, 5.000) | (5.000, 5.000) |
+| EKF beacon | hoạt động | hoạt động |
+
+> **Bài học**: một dòng lỗi `[Err]` của Gazebo có thể chỉ là *plugin không
+> được dùng đúng chỗ*, không phải *pipeline hỏng*. Đọc source của plugin để
+> xác nhận trước khi sửa.
+
+---
+
 ## Phase 6 — Verify + Flight test
 
 **Mục tiêu:** bay thật, giữ vị trí ổn định.
