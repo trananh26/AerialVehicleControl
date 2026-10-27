@@ -593,6 +593,47 @@ MAVProxy tạo output với `input=False` (chỉ gửi đi, không bind), nên M
 Planner phải tự bind UDP server trên 14551 — đúng cách Mission Planner
 kết nối tới `UDP (copter)` với port 14551.
 
+### R17b — Port 5760 còn bị chiếm bởi SITL instance cũ
+
+SITL bind port 5760 (MAVLink) và 5761 (beacon) rồi **thoát** nếu port đã
+bị chiếm:
+
+```
+bind failed on port 5760 - Address already in use
+```
+
+Dòng này dễ bị bỏ qua. Triệu chứng tiếp theo là MAVProxy retry vô hạn:
+
+```
+[mavproxy.py -6] Connection reset or closed by TCP socket
+[mavproxy.py -6] Attempting reconnect
+[mavproxy.py -6] [Errno 111] Connection refused sleeping
+[mavproxy.py -6] link 1 down
+```
+
+Dấu hiệu phân biệt: `link 1 down` **đi kèm** `Detected vehicle 1:1 on link 0`
+và `link 1 OK` là bình thường — MAVProxy khởi động trước SITL nên vài giây
+đầu chưa có heartbeat. Nếu `link 1 down` đi kèm `Connection refused` liên
+tục và **không** có `link 1 OK`, thì SITL đã chết.
+
+Launch file giờ kiểm tra cả hai port trước khi khởi động và báo lỗi rõ
+ràng:
+
+```
+[ERROR] [launch]: Caught exception in launch: TCP port(s) 5760 are still in
+use.  A previous SITL instance is probably still running.  Stop it first:
+    pkill -f arducopter
+    pkill -f mavproxy.py
+```
+
+Cách xử lý:
+
+```bash
+pkill -f arducopter
+pkill -f mavproxy.py
+pkill -f "gz sim"
+```
+
 ### R18 — MAVLink command phải dùng `target_component = 1`
 
 Heartbeat được broadcast với component 0, nên `mav.target_component` là 0.
@@ -822,7 +863,10 @@ PIPELINE: PASSED
 ### Chạy tay
 
 ```bash
-# 1. Launch toàn bộ stack (Gazebo GUI + RViz + SITL + UWB)
+# Dọn instance cũ trước, nếu không SITL sẽ không bind được port 5760
+pkill -f arducopter; pkill -f mavproxy.py; pkill -f "gz sim"
+
+# Launch toàn bộ stack (Gazebo GUI + RViz + SITL + UWB)
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch uwb_pozyx_bridge x500_uwb_runway.launch.py
