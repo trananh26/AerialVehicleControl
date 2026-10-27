@@ -336,9 +336,9 @@ UwbSystem::PostUpdate(
     tag_pose.Y(),
     tag_pose.Z() + tag_z_offset_);
 
-  gzdbg << "[UwbSystem] tag pose from " << pose_src << ": "
-        << tag_world.x() << ", " << tag_world.y() << ", "
-        << tag_world.z() << std::endl;
+  // gzdbg << "[UwbSystem] tag pose from " << pose_src << ": "
+  //       << tag_world.x() << ", " << tag_world.y() << ", "
+  //       << tag_world.z() << std::endl;
 
   // Refresh anchor positions and compute ranging.
   RefreshAnchorPositions(_ecm);

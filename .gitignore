@@ -14,3 +14,7 @@ mav.tlog
 mav.tlog.raw
 terrain/
 mav_0_1.parm
+
+# Frame-graph dumps produced by tools/inspect_frames.py
+frames_*.gv
+frames_*.pdf

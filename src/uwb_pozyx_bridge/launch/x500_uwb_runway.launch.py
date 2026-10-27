@@ -45,6 +45,10 @@ SPAWN_Z = 0.1
 #: The serial port SITL listens on for the Pozyx protocol.
 BEACON_SERIAL_PORT = 5761
 
+#: The name of the Gazebo world, which has to match the <world name="...">
+#: attribute in uwb_runway.sdf.
+WORLD_NAME = "uwb_runway"
+
 
 def _uwb_world_path() -> str:
     """Full path to the UWB world."""
@@ -116,6 +120,11 @@ def generate_launch_description() -> LaunchDescription:
             # MAVROS is off by default: it is only needed once the vehicle
             # is actually controlled over ROS.
             "use_mavros": LaunchConfiguration("use_mavros"),
+            # The Gazebo world of this launch file is the UWB world, so the
+            # bridge has to subscribe to /world/uwb_runway/... and not to
+            # /world/runway/...  Without this the joint states never arrive
+            # and RViz reports "No transform from [rotor_0] to [odom]".
+            "world_name": WORLD_NAME,
             # SERIAL1 carries the Pozyx beacon protocol.  The ":wait" suffix
             # makes SITL block until the Pozyx node connects, so no beacon
             # frame is missed during start-up.
@@ -164,7 +173,7 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument(
                 "use_mavros",
-                default_value="false",
+                default_value="true",
                 description=(
                     "Launch MAVROS.  Off by default; enable it when the "
                     "vehicle has to be controlled over ROS."
