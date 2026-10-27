@@ -20,6 +20,7 @@ Mission Planner connects to the MAVProxy UDP output on port 14551.
 """
 
 import os
+import socket
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -57,6 +58,39 @@ def _merged_params() -> str:
     return os.path.join(
         get_package_share_directory("uwb_pozyx_bridge"), "config", "x500_uwb.parm"
     )
+
+
+def _port_is_free(port: int) -> bool:
+    """Whether the given TCP port can still be bound."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("0.0.0.0", port))
+        except OSError:
+            return False
+    return True
+
+
+def _check_ports(context):
+    """Fail early when a port of the stack is still in use.
+
+    SITL binds its MAVLink port (5760) and the beacon port (5761) and
+    exits with "bind failed on port 5760 - Address already in use" when
+    they are taken.  That message is easy to miss, and the symptom that
+    follows is MAVProxy retrying forever with "link 1 down", which looks
+    like a telemetry problem rather than a stale process.
+    """
+    busy = [port for port in (5760, BEACON_SERIAL_PORT) if not _port_is_free(port)]
+    if busy:
+        raise RuntimeError(
+            "TCP port(s) "
+            + ", ".join(str(p) for p in busy)
+            + " are still in use.  A previous SITL instance is probably "
+            "still running.  Stop it first, for example with:\n"
+            "    pkill -f arducopter\n"
+            "    pkill -f mavproxy.py"
+        )
+    return []
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -153,6 +187,9 @@ def generate_launch_description() -> LaunchDescription:
                     "How long the MAVLink monitor stays connected, in seconds."
                 ),
             ),
+            # Fail early with a clear message when a port of the stack is
+            # still taken by a previous run.
+            OpaqueFunction(function=_check_ports),
             base,
             gz_bridge,
             # The monitor connects to SITL's MAVLink port, which is only
