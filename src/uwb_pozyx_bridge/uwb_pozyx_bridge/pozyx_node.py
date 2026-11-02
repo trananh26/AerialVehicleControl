@@ -36,6 +36,7 @@ from .pozyx_protocol import (
     encode_beacon_config,
     encode_beacon_distance,
     encode_vehicle_position,
+    enu_to_wire_mm,
 )
 from .pozyx_sender import PozyxSender
 from .trilateration import Anchor, RangeMeasurement, solve_position
@@ -216,12 +217,18 @@ class PozyxBridgeNode(Node):
         if now - self._last_config_send >= config_interval:
             self._last_config_send = now
             for anchor in self._anchors:
+                # The anchors are known in the Gazebo ENU frame; the wire
+                # wants North/East/Up, so the horizontal axes are swapped
+                # here.  Getting this wrong mirrors the whole beacon
+                # system across the diagonal and the EKF ends up flying to
+                # a reflected position.
+                n_mm, e_mm, u_mm = enu_to_wire_mm(*anchor.position)
                 frames += encode_beacon_config(
                     anchor.id,
                     len(self._anchors),
-                    int(round(anchor.position[0] * 1000.0)),
-                    int(round(anchor.position[1] * 1000.0)),
-                    int(round(anchor.position[2] * 1000.0)),
+                    n_mm,
+                    e_mm,
+                    u_mm,
                 )
 
         # Distances, one frame per anchor.
@@ -233,20 +240,21 @@ class PozyxBridgeNode(Node):
                 anchor.id, int(round(measurement.range_m * 1000.0))
             )
 
-        # The vehicle position fix.
-        x_mm = int(round(result.position[0] * 1000.0))
-        y_mm = int(round(result.position[1] * 1000.0))
-        z_mm = int(
-            round(
-                float(self.get_parameter("tag_altitude_mm").value)
-                if bool(self.get_parameter("assume_constant_z").value)
-                else result.position[2] * 1000.0
-            )
+        # The vehicle position fix.  The trilateration result is in the
+        # Gazebo ENU frame, so the horizontal axes are swapped on the way
+        # out (see the module docstring of pozyx_protocol).
+        z_m = (
+            float(self.get_parameter("tag_altitude_mm").value) / 1000.0
+            if bool(self.get_parameter("assume_constant_z").value)
+            else result.position[2]
+        )
+        n_mm, e_mm, u_mm = enu_to_wire_mm(
+            result.position[0], result.position[1], z_m
         )
         frames += encode_vehicle_position(
-            x_mm,
-            y_mm,
-            z_mm,
+            n_mm,
+            e_mm,
+            u_mm,
             int(round(float(self.get_parameter("position_accuracy_m").value))),
         )
 

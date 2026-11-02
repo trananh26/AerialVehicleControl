@@ -18,12 +18,29 @@ so that the XOR over the whole frame (excluding the header) is zero.
 
 Coordinate convention
 ---------------------
-ArduPilot's parser converts the incoming values from ENU to NED itself::
+The wire format is **NED millimetres**: the first horizontal field is North,
+the second is East, and the vertical field is Up.
+
+ArduPilot's parser turns the incoming values into its own NED frame like
+this::
 
     Vector3f beacon_pos(beacon_x * 0.001f, beacon_y * 0.001f, -beacon_z * 0.001f);
 
-so this module encodes **ENU millimetres** exactly as the Arduino sketch does
-and performs no frame conversion.
+so wire ``x`` becomes NED **North**, wire ``y`` becomes NED **East** and the
+sign of wire ``z`` is flipped to get NED Down.  The Arduino sketch sends the
+anchor layout in exactly that order, and ``AP_Beacon_SITL`` (the reference
+backend) uses the same convention: ``veh_pos3d`` is built from
+``get_distance_NE``, i.e. North first.
+
+The Gazebo world, by contrast, is **ENU**: ``x`` is East, ``y`` is North and
+``z`` is Up.  The two differ by a swap of the horizontal axes, which is a
+*reflection* (determinant -1) and therefore cannot be undone by any rotation.
+Sending the Gazebo ``x`` straight into the wire ``x`` field silently swaps
+North and East for the whole beacon system.
+
+To keep the arithmetic in one place, this module exposes
+:func:`enu_to_wire_mm`, which converts a Gazebo ENU position into the wire
+millimetre triple.  Everything in this package converts through it.
 """
 
 from __future__ import annotations
@@ -40,6 +57,7 @@ __all__ = [
     "encode_beacon_distance",
     "encode_vehicle_position",
     "encode_message",
+    "enu_to_wire_mm",
 ]
 
 # --- constants mirrored from IndoorLoiter.ino ---------------------------
@@ -94,20 +112,51 @@ def encode_message(msg_id: int, payload: bytes) -> bytes:
     return bytes((MSG_HEADER, msg_id, msg_len)) + payload + bytes((checksum,))
 
 
+def enu_to_wire_mm(
+    east_m: float, north_m: float, up_m: float
+) -> tuple[int, int, int]:
+    """Convert a Gazebo ENU position into the wire's NED millimetres.
+
+    The wire frame is North/East/Up, while Gazebo is East/North/Up, so the
+    two horizontal fields are swapped.  The vertical field keeps its sign:
+    ArduPilot flips it itself (``-beacon_z * 0.001f``).
+
+    Args:
+        east_m: East offset in metres.
+        north_m: North offset in metres.
+        up_m: Up offset in metres.
+
+    Returns:
+        The ``(north_mm, east_mm, up_mm)`` triple to put on the wire.
+
+    Example:
+        >>> enu_to_wire_mm(2.0, -1.0, 0.5)
+        (-1000, 2000, 500)
+    """
+    return (
+        int(round(north_m * 1000.0)),
+        int(round(east_m * 1000.0)),
+        int(round(up_m * 1000.0)),
+    )
+
+
 def encode_beacon_config(
     beacon_id: int, beacon_count: int, x_mm: int, y_mm: int, z_mm: int
 ) -> bytes:
     """Encode a ``MSGID_BEACON_CONFIG`` message.
 
-    Tells ArduPilot where a single anchor is located, in ENU millimetres
+    Tells ArduPilot where a single anchor is located, in wire millimetres
     relative to the beacon system's origin.
+
+    The wire fields are **North, East, Up** -- see the module docstring and
+    :func:`enu_to_wire_mm`.
 
     Args:
         beacon_id: Index of the anchor, 0-based.
         beacon_count: Total number of anchors in the system.
-        x_mm: Anchor east offset in millimetres.
-        y_mm: Anchor north offset in millimetres.
-        z_mm: Anchor up offset in millimetres.
+        x_mm: Anchor North offset in millimetres.
+        y_mm: Anchor East offset in millimetres.
+        z_mm: Anchor Up offset in millimetres.
     """
     payload = struct.pack("<BBiii", beacon_id, beacon_count, x_mm, y_mm, z_mm)
     return encode_message(MSGID_BEACON_CONFIG, payload)
@@ -131,8 +180,9 @@ def encode_vehicle_position(
 ) -> bytes:
     """Encode a ``MSGID_POSITION`` message.
 
-    Reports the vehicle tag's position in ENU millimetres, relative to the
-    beacon system's origin, together with the positioning error estimate.
+    Reports the vehicle tag's position in wire millimetres (North, East, Up),
+    relative to the beacon system's origin, together with the positioning
+    error estimate.
 
     .. warning::
        **Unit mismatch in ArduPilot (upstream bug).**
@@ -160,9 +210,9 @@ def encode_vehicle_position(
        the same ``int16`` field; only its interpretation differs.
 
     Args:
-        x_mm: Vehicle east offset in millimetres.
-        y_mm: Vehicle north offset in millimetres.
-        z_mm: Vehicle up offset in millimetres.
+        x_mm: Vehicle North offset in millimetres.
+        y_mm: Vehicle East offset in millimetres.
+        z_mm: Vehicle Up offset in millimetres.
         position_error_mm: Positioning error estimate.  See the warning above:
             to be interpreted correctly by the EKF this must be in metres,
             not millimetres.

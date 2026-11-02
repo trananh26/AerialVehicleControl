@@ -168,7 +168,15 @@ Nguồn: `Tools/Pozyx/IndoorLoiter/IndoorLoiter.ino` (ArduPilot master).
 
 ## 4. Frame convention (ENU → NED)
 
-Cả Pozyx và NoopLoop đều **nhận ENU và tự đảo sang NED** phía ArduPilot:
+> ⚠️ **ĐÃ SỬA — mục này trước đây sai và là nguyên nhân drone bay sai quỹ đạo.**
+> Xem §4.1 bên dưới.
+
+
+
+### 4.1 Cơ chế thật của ArduPilot
+
+`AP_Beacon_Pozyx.cpp` **không** tự đảo ENU→NED. Nó đọc byte thô và gán
+thẳng vào hệ NED:
 
 ```cpp
 // AP_Beacon_Pozyx.cpp
@@ -176,16 +184,68 @@ Vector3f beacon_pos(beacon_x * 0.001f, beacon_y * 0.001f, -beacon_z * 0.001f);
 Vector3f veh_pos(vehicle_x * 0.001f, vehicle_y * 0.001f, -vehicle_z * 0.001f);
 ```
 
-```cpp
-// AP_Beacon_Nooploop.cpp
-const Vector3f pos_m {pos_y * 0.001f, pos_x * 0.001f, -pos_z * 0.001f};
+Nghĩa là:
+
+
+| byte trên wire | ArduPilot hiểu là | Nên gửi (Gazebo ENU) |
+| -------------- | ----------------- | -------------------- |
+| `x`            | NED **North**     | `y` (Gazebo North)   |
+| `y`            | NED **East**      | `x` (Gazebo East)    |
+| `z`            | NED **Down**      | `z` (Gazebo Up)      |
+
+
+`AP_Beacon_Nooploop.cpp` có `pos_m {pos_y, pos_x, -pos_z}` — tức là *nó* đảo
+trục ngang. Vậy nên Pozyx và NoopLoop **không** dùng cùng một convention:
+Pozyx coi byte `x` là North, NoopLoop coi byte `x` là East.
+
+→ **Node Python phải gửi byte** `x` **= North, byte** `y` **= East.**
+
+Hàm `enu_to_wire_mm()` trong `pozyx_protocol.py` làm đúng việc này, và là
+**điểm duy nhất** trong codebase được phép đổi frame:
+
+```python
+def enu_to_wire_mm(east_m, north_m, up_m):
+    """Gazebo ENU -> Pozyx wire (x = NED North, y = NED East, z = Up)."""
+    return (
+        int(round(north_m * 1000.0)),
+        int(round(east_m * 1000.0)),
+        int(round(up_m * 1000.0)),
+    )
 ```
 
-→ **Node Python gửi ENU (Gazebo world frame), KHÔNG transform.**
 
-Gazebo là ENU (x=East, y=North, z=Up); Pozyx cũng ENU. Khớp tự nhiên.
 
-⚠️ Đây là điểm dễ sai nhất. Không được transform trong node.
+### 4.2 Bằng chứng thực nghiệm
+
+Teleport thử drone trong Gazebo tới vị trí tương đối `(-1.0, +2.0)`:
+
+
+|                            | x          | y          |
+| -------------------------- | ---------- | ---------- |
+| Gazebo truth (ENU)         | −1.000     | +2.000     |
+| **Trước khi sửa** — MAVROS | **+1.957** | **−1.050** |
+| **Sau khi sửa** — MAVROS   | −1.025     | +2.022     |
+
+
+Sai số trước khi sửa là **4.276 m** và có dấu hiệu **hoán đổi trục**
+(determinant âm — phản xạ qua đường chéo), đúng như dự đoán. Sau khi sửa
+sai số là **0.034 m**.
+
+### 4.3 Hệ quả: vì sao drone bị lật
+
+Khi vị trí bị hoán đổi trục, vector lỗi vị trí mà autopilot phải bay về
+chĩa ngược hướng với hướng yaw mà lệnh đặt — lệch nhau khoảng 90°. Bộ điều
+khiển phải nghiêng hết cỡ để vừa bay về đích vừa giữ yaw, góc nghiêng vượt
+`ANGLE_MAX` (30° mặc định) và động cơ bão hoà → drone lật.
+
+Ngoài ra `setpoint_velocity` (`SubMode::VelAccel`) tắt hẳn vòng lặp
+position P-term, còn EKF ở đây **không có** nguồn vận tốc ngoài
+(`EK3_SRC1_VELXY = 0`, UWB chỉ fuse *khoảng cách*), nên sai số vị trí cộng dồn
+không bị triệt tiêu.
+
+→ Vì vậy `circle_mission.py` phải dùng **position control**
+(`/mavros/setpoint_raw/local`, mask `0x1C0 | 0x800` → `SubMode::PosVelAccel`)
+và **luôn chỉ yaw về tâm đường tròn** để góc nghiêng giữ ở mức nhỏ.
 
 ---
 

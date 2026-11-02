@@ -34,6 +34,7 @@ from uwb_pozyx_bridge.pozyx_protocol import (
     encode_beacon_config,
     encode_beacon_distance,
     encode_vehicle_position,
+    enu_to_wire_mm,
 )
 
 
@@ -47,6 +48,9 @@ from uwb_pozyx_bridge.pozyx_protocol import (
 # the vehicle spawns).  This mirrors the Gazebo setup where the four anchors
 # sit at the corners of a 10 m x 10 m area and the drone starts in the
 # middle.
+#
+# The tuples are in the Gazebo **ENU** frame (x = East, y = North); they are
+# converted to the wire's North/East ordering by ``enu_to_wire_mm``.
 #
 # Note on the anchor height: the Arduino sketch uses -1200 mm, meaning the
 # anchors are 1.2 m above the vehicle's starting altitude.  The Pozyx backend
@@ -136,7 +140,8 @@ class FakePozyxSender:
         """Orbit the vehicle around the centre of the anchor square.
 
         The beacon origin is the centre of the 10 m x 10 m anchor layout, so
-        the vehicle position is expressed relative to it, in ENU millimetres.
+        the vehicle position is expressed relative to it, in Gazebo ENU
+        millimetres (x = East, y = North).
         """
         if self.static:
             return (self.static_x, self.static_y, self.static_z)
@@ -153,8 +158,11 @@ class FakePozyxSender:
         # The Arduino sketch sends the anchor configuration during start-up.
         if not self._sent_configs:
             for beacon_id, x_mm, y_mm, z_mm in self.anchors:
+                n_mm, e_mm, u_mm = enu_to_wire_mm(
+                    x_mm / 1000.0, y_mm / 1000.0, z_mm / 1000.0
+                )
                 frames += encode_beacon_config(
-                    beacon_id, len(self.anchors), int(x_mm), int(y_mm), int(z_mm)
+                    beacon_id, len(self.anchors), n_mm, e_mm, u_mm
                 )
             self._sent_configs = True
 
@@ -166,10 +174,13 @@ class FakePozyxSender:
             frames += encode_beacon_distance(beacon_id, int(round(dist_mm)))
 
         # Vehicle position fix.
+        n_mm, e_mm, u_mm = enu_to_wire_mm(
+            pos[0] / 1000.0, pos[1] / 1000.0, pos[2] / 1000.0
+        )
         frames += encode_vehicle_position(
-            int(round(pos[0])),
-            int(round(pos[1])),
-            int(round(pos[2])),
+            n_mm,
+            e_mm,
+            u_mm,
             self.position_error_mm,
         )
 

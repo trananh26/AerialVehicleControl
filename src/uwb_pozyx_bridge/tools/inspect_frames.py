@@ -12,9 +12,12 @@ The chain being checked:
         minus the beacon origin
     beacon-relative (ENU, m)
         times 1000
-    Pozyx wire (mm, ENU)
+    Pozyx wire (mm, North/East/Up)
         AP_Beacon_Pozyx flips the sign of z
     ArduPilot (NED, m)
+
+Note the horizontal swap: the wire frame is North-first while Gazebo is
+East-first, so the two horizontal fields are exchanged on the way out.
 
 Usage::
 
@@ -51,6 +54,7 @@ from uwb_pozyx_bridge.pozyx_protocol import (  # noqa: E402
     encode_beacon_config,
     encode_beacon_distance,
     encode_vehicle_position,
+    enu_to_wire_mm,
 )
 from uwb_pozyx_bridge.trilateration import (  # noqa: E402
     Anchor,
@@ -217,9 +221,8 @@ def main(argv: list[str] | None = None) -> int:
                   "so a non-zero position is expected")
 
         # --- the frames that would go on the wire -----------------------
-        x_mm = int(round(pos[0] * 1000.0))
-        y_mm = int(round(pos[1] * 1000.0))
-        z_mm = 0
+        z_m = 0.0
+        n_mm, e_mm, u_mm = enu_to_wire_mm(pos[0], pos[1], z_m)
         accuracy = int(round(args.position_accuracy_m))
 
         print()
@@ -227,12 +230,13 @@ def main(argv: list[str] | None = None) -> int:
 
         frames = bytearray()
         for anchor in anchors:
+            an, ae, au = enu_to_wire_mm(*anchor.position)
             frames += encode_beacon_config(
                 anchor.id,
                 len(anchors),
-                int(round(anchor.position[0] * 1000.0)),
-                int(round(anchor.position[1] * 1000.0)),
-                int(round(anchor.position[2] * 1000.0)),
+                an,
+                ae,
+                au,
             )
         for anchor in anchors:
             measurement = node.ranges.get(anchor.id)
@@ -241,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
             frames += encode_beacon_distance(
                 anchor.id, int(round(measurement.range_m * 1000.0))
             )
-        frames += encode_vehicle_position(x_mm, y_mm, z_mm, accuracy)
+        frames += encode_vehicle_position(n_mm, e_mm, u_mm, accuracy)
 
         for frame in _split_frames(bytes(frames)):
             msg_id, payload = frame
@@ -249,7 +253,9 @@ def main(argv: list[str] | None = None) -> int:
 
         print()
         print("=== decode of the vehicle position frame ===")
-        print(f"  x = {x_mm} mm, y = {y_mm} mm, z = {z_mm} mm")
+        print(f"  wire x = {n_mm} mm  (North)")
+        print(f"  wire y = {e_mm} mm  (East)")
+        print(f"  wire z = {u_mm} mm  (Up)")
         print(f"  position_error = {accuracy}  (metres, workaround R2)")
         if accuracy >= 1:
             failures.append(
@@ -260,10 +266,33 @@ def main(argv: list[str] | None = None) -> int:
         # --- what ArduPilot will make of it ----------------------------
         print()
         print("=== what AP_Beacon_Pozyx hands to the EKF ===")
-        print(f"  NED north = {x_mm / 1000.0:+.3f} m")
-        print(f"  NED east  = {y_mm / 1000.0:+.3f} m")
-        print(f"  NED down  = {-z_mm / 1000.0:+.3f} m")
-        print("  (the Pozyx backend converts ENU mm to NED m itself)")
+        print(f"  NED north = {n_mm / 1000.0:+.3f} m")
+        print(f"  NED east  = {e_mm / 1000.0:+.3f} m")
+        print(f"  NED down  = {-u_mm / 1000.0:+.3f} m")
+        print("  (the wire is North/East/Up; ArduPilot flips z itself)")
+
+        # --- the frame check that matters -------------------------------
+        # ArduPilot's NED frame is the Gazebo frame rotated into NED, and
+        # for this world that means North = Gazebo +Y and East = Gazebo +X.
+        # If the wire encoding ever stops swapping the horizontal axes
+        # again, the EKF position ends up mirrored across the diagonal and
+        # the drone flies to a reflected location.
+        print()
+        print("=== frame consistency check ===")
+        expected_north = pos[1]
+        expected_east = pos[0]
+        north_err = abs(n_mm / 1000.0 - expected_north)
+        east_err = abs(e_mm / 1000.0 - expected_east)
+        print(f"  expected NED north (Gazebo +Y): {expected_north:+.3f} m")
+        print(f"  expected NED east  (Gazebo +X): {expected_east:+.3f} m")
+        print(f"  north error {north_err:.3f} m, east error {east_err:.3f} m")
+        if north_err > 0.001 or east_err > 0.001:
+            failures.append(
+                "the wire encoding does not map the Gazebo position onto "
+                "ArduPilot's NED frame"
+            )
+        else:
+            print("  -> the wire axes agree with ArduPilot's NED frame")
 
     print()
     if failures:

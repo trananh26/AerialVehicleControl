@@ -9,6 +9,9 @@ from uwb_pozyx_bridge.pozyx_protocol import (
     MSGID_BEACON_CONFIG,
     MSGID_BEACON_DIST,
     MSGID_POSITION,
+    encode_beacon_config,
+    encode_vehicle_position,
+    enu_to_wire_mm,
 )
 from uwb_pozyx_bridge.uwb_decoding import (
     anchor_offsets_from_world,
@@ -175,3 +178,102 @@ def test_anchor_offsets_convert_to_metres_for_the_solver():
     assert anchor.position[0] == pytest.approx(-5.0)
     assert anchor.position[1] == pytest.approx(-5.0)
     assert anchor.position[2] == pytest.approx(1.9)
+
+
+# --------------------------------------------------------- frame convention
+
+
+def test_enu_to_wire_swaps_the_horizontal_axes():
+    """Gazebo is East-first, the wire is North-first."""
+    north_mm, east_mm, up_mm = enu_to_wire_mm(2.0, -1.0, 0.5)
+
+    assert north_mm == -1000
+    assert east_mm == 2000
+    assert up_mm == 500
+
+
+def test_enu_to_wire_is_not_the_identity():
+    """A point off the diagonal must not survive the conversion unchanged."""
+    north_mm, east_mm, _ = enu_to_wire_mm(2.0, -1.0, 0.0)
+
+    assert north_mm != 2000
+    assert east_mm != -1000
+
+
+def test_wire_conversion_is_a_reflection():
+    """Swapping two axes has determinant -1; no rotation can undo it.
+
+    This is why a yaw error cannot compensate for the swap: the whole
+    beacon system is mirrored across the diagonal.
+    """
+    # Two points that are not symmetric about the diagonal.
+    a = enu_to_wire_mm(2.0, -1.0, 0.0)
+    b = enu_to_wire_mm(-0.5, 3.0, 0.0)
+
+    # After the swap the two points are on the other side of the diagonal.
+    assert (a[0] > a[1]) != (b[0] > b[1])
+
+
+def test_anchor_config_frame_uses_north_east_order():
+    """The anchor config frame must carry North in the first field."""
+    import struct
+
+    # Anchor 1 is at Gazebo (10, 0, 2.0), i.e. 5 m East of the origin.
+    east_m, north_m, up_m = 5.0, 0.0, 1.9
+    n_mm, e_mm, u_mm = enu_to_wire_mm(east_m, north_m, up_m)
+
+    data = encode_beacon_config(1, 4, n_mm, e_mm, u_mm)
+    _, payload = _split_frames(data)[0]
+    beacon_id, beacon_count, x, y, z = struct.unpack("<BBiii", payload)
+
+    assert beacon_id == 1
+    assert beacon_count == 4
+    # North is 0, East is +5000: the first field must be the North one.
+    assert x == 0
+    assert y == 5000
+    assert z == 1900
+
+
+def test_vehicle_position_frame_uses_north_east_order():
+    """The vehicle position frame must carry North in the first field."""
+    import struct
+
+    n_mm, e_mm, u_mm = enu_to_wire_mm(-1.0, 2.0, 0.0)
+    data = encode_vehicle_position(n_mm, e_mm, u_mm, 0)
+    _, payload = _split_frames(data)[0]
+    x, y, z, accuracy = struct.unpack("<iiih", payload)
+
+    # Gazebo (East=-1, North=+2) -> wire (North=+2000, East=-1000).
+    assert x == 2000
+    assert y == -1000
+    assert z == 0
+    assert accuracy == 0
+
+
+def test_round_trip_through_the_ardupilot_parser():
+    """Simulate what AP_Beacon_Pozyx does with the frames we send.
+
+    ArduPilot builds the NED position as
+    ``Vector3f(x * 0.001f, y * 0.001f, -z * 0.001f)``, so the wire's first
+    horizontal field becomes NED North.  The result has to match the Gazebo
+    ENU position with the axes swapped, because ArduPilot's NED frame for
+    this world is Gazebo's North-first.
+    """
+    import struct
+
+    gazebo_east, gazebo_north, gazebo_up = 1.5, -2.5, 0.75
+    n_mm, e_mm, u_mm = enu_to_wire_mm(gazebo_east, gazebo_north, gazebo_up)
+
+    data = encode_vehicle_position(n_mm, e_mm, u_mm, 0)
+    _, payload = _split_frames(data)[0]
+    x, y, z, _ = struct.unpack("<iiih", payload)
+
+    # This is AP_Beacon_Pozyx::parse_buffer() verbatim.
+    ned_north = x * 0.001
+    ned_east = y * 0.001
+    ned_down = -z * 0.001
+
+    # ArduPilot's NED North is Gazebo's +Y and NED East is Gazebo's +X.
+    assert ned_north == pytest.approx(gazebo_north)
+    assert ned_east == pytest.approx(gazebo_east)
+    assert ned_down == pytest.approx(-gazebo_up)

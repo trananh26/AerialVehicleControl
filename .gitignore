@@ -7,6 +7,10 @@ install/
 log/
 logs/
 
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
 # ArduPilot runtime files
 eeprom.bin
 mav.parm
