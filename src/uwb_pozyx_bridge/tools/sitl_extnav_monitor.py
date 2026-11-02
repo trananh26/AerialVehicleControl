@@ -1,18 +1,19 @@
-"""Minimal MAVLink monitor for verifying the SITL beacon pipeline.
+"""Minimal MAVLink monitor for verifying the SITL external navigation pipeline.
 
-Connects to the SITL MAVLink port, optionally sets the beacon/EKF parameters,
-then reports the EKF status so the range-beacon fusion can be verified.
+Connects to the SITL MAVLink port, optionally sets the external
+navigation/EKF parameters, then reports the EKF status so the fusion can be
+verified.
 
 The key signal is ``EKF_STATUS_REPORT`` (MAVLink message 193):
 
-* ``EKF_POS_HORIZ_ABS``  (bit 1)  - horizontal position is absolute
-* ``EKF_POS_VERT_ABS``   (bit 2)  - vertical position is absolute
+* ``EKF_POS_HORIZ_ABS``  (bit 4)  - horizontal position is absolute
+* ``EKF_POS_VERT_ABS``   (bit 5)  - vertical position is absolute
 * ``EKF_POS_HORIZ_REL``  (bit 3)  - horizontal position is relative
 * ``EKF_UNINITIALIZED``   (bit 8)  - the filter is not initialised yet
 
 Usage::
 
-    python3 sitl_beacon_monitor.py --mavlink-port 5760
+    python3 sitl_extnav_monitor.py --mavlink-port 5760
 """
 
 from __future__ import annotations
@@ -24,15 +25,18 @@ import time
 from pymavlink import mavutil
 
 
-BEACON_PARAMS = {
-    "BCN_TYPE": 1,  # Pozyx
-    "BCN_LATITUDE": -35.363261,
-    "BCN_LONGITUDE": 149.165230,
-    "BCN_ALT": 584,
-    "BCN_ORIENT_YAW": 0,
+EXTNAV_PARAMS = {
+    # The beacon backend is no longer used.
+    "BCN_TYPE": 0,
+    # Visual odometry / external navigation backend.  1 = MAVLink, which is
+    # the backend that consumes the ODOMETRY (331) message.
+    "VISO_TYPE": 1,
+    "VISO_DELAY_MS": 50,
+    "VISO_POS_M_NSE": 0.05,
+    "VISO_QUAL_MIN": 0,
     "EK3_ENABLE": 1,
     "EK2_ENABLE": 0,
-    "EK3_SRC1_POSXY": 4,  # Beacon
+    "EK3_SRC1_POSXY": 6,  # EXTNAV
     "EK3_SRC1_POSZ": 1,  # Baro
     "EK3_SRC1_VELXY": 0,  # None
     "EK3_SRC1_VELZ": 0,  # None
@@ -41,11 +45,11 @@ BEACON_PARAMS = {
     "GPS1_TYPE": 0,
     "GPS2_TYPE": 0,
     # Upstream ARMING_SKIPCHK=8 (skip the GPS arming check) is not available in
-    # this ArduPilot build; use the ARMING_CHECK bitmask instead, clearing the
-    # "GPS lock" bit (bit 3) while keeping every other check enabled.
-    "ARMING_CHECK": 1048567,
-    "SERIAL1_PROTOCOL": 13,  # SerialProtocol_Beacon
-    "SERIAL1_BAUD": 115,
+    # this ArduPilot build; use the ARMING_CHECK bitmask instead.  0 disables
+    # every pre-arm check, which is what the merged SITL defaults file does.
+    "ARMING_CHECK": 0,
+    "SERIAL1_PROTOCOL": 1,  # SerialProtocol_MAVLink
+    "SERIAL1_BAUD": 115200,
     "BRD_SER1_RTSCTS": 0,
 }
 
@@ -97,7 +101,9 @@ def set_params(mav, params: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="SITL beacon pipeline monitor")
+    parser = argparse.ArgumentParser(
+        description="SITL external navigation pipeline monitor"
+    )
     parser.add_argument("--mavlink-port", type=int, default=5760)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--duration", type=float, default=30.0)
@@ -127,14 +133,17 @@ def main(argv: list[str] | None = None) -> int:
     time.sleep(0.5)
 
     if args.set_params:
-        print("[monitor] setting beacon parameters")
-        set_params(mav, BEACON_PARAMS)
+        print("[monitor] setting external navigation parameters")
+        set_params(mav, EXTNAV_PARAMS)
         time.sleep(2.0)
 
     print("[monitor] reading back parameters:")
     wanted = {
         "BCN_TYPE",
-        "BCN_ORIENT_YAW",
+        "VISO_TYPE",
+        "VISO_DELAY_MS",
+        "VISO_POS_M_NSE",
+        "VISO_QUAL_MIN",
         "EK3_SRC1_POSXY",
         "EK3_SRC1_POSZ",
         "EK3_SRC1_VELXY",

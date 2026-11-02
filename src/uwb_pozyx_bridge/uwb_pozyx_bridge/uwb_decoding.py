@@ -31,11 +31,11 @@ __all__ = [
 
 #: The Gazebo world places the four anchors on the corners of a 10 m x 10 m
 #: square at z = 2.0 m, and the vehicle spawns at the centre, (5, 5, 0.1).
-#: These are the anchor positions **relative to the beacon origin**, in
+#: These are the anchor positions **relative to the UWB origin**, in
 #: millimetres, expressed in the Gazebo **ENU** frame (x = East,
 #: y = North).  They feed the trilateration solver, which works in the same
-#: frame; the conversion to the wire's North/East ordering happens once, in
-#: :func:`uwb_pozyx_bridge.pozyx_protocol.enu_to_wire_mm`.
+#: frame; the conversion to the NED ordering that ArduPilot expects happens
+#: once, in :func:`uwb_pozyx_bridge.mavlink_odometry.enu_to_ned_m`.
 DEFAULT_ANCHOR_OFFSETS_MM = (
     (-5000.0, -5000.0, 1900.0),
     (5000.0, -5000.0, 1900.0),
@@ -78,15 +78,14 @@ def anchor_offsets_from_world(
     world_positions: list[tuple[float, float, float]],
     beacon_origin: tuple[float, float, float],
 ) -> list[tuple[float, float, float]]:
-    """Convert anchor positions in the world frame to beacon-relative offsets.
+    """Convert anchor positions in the world frame to UWB-relative offsets.
 
-    ArduPilot's Pozyx backend expects each anchor's position **relative to the
-    beacon system origin**, in millimetres.  The beacon origin is the
-    position where the vehicle spawns.
+    The offsets are the anchor positions **relative to the UWB system
+    origin**, which is the position where the vehicle spawns.
 
     The offsets are returned in the Gazebo **ENU** frame (x = East,
-    y = North); the conversion to the wire's North/East ordering is done by
-    :func:`uwb_pozyx_bridge.pozyx_protocol.enu_to_wire_mm`.
+    y = North); the conversion to the NED ordering that ArduPilot expects is
+    done by :func:`uwb_pozyx_bridge.mavlink_odometry.enu_to_ned_m`.
 
     Args:
         world_positions: Anchor positions in the Gazebo world frame, metres.

@@ -31,10 +31,10 @@ Everything published here is in the **ENU** frame that MAVROS expects:
 
 MAVROS converts this to the MAVLink NED frame before it reaches the
 autopilot, and the same conversion is applied to the ``/mavros/local_position/pose``
-that the mission reads back, so the two are consistent.  The UWB beacon frames
-use a *different* convention on the wire (ArduPilot's Pozyx parser reads the
-first byte as NED North), which is handled inside ``uwb_pozyx_bridge``; see
-``enu_to_wire_mm`` in ``pozyx_protocol.py``.
+that the mission reads back, so the two are consistent.  The UWB pipeline
+uses a *different* convention on the wire (ArduPilot fuses the ODOMETRY
+position as-is, in NED), which is handled inside ``uwb_pozyx_bridge``; see
+``enu_to_ned_m`` in ``mavlink_odometry.py``.
 
 Setpoint shape
 --------------

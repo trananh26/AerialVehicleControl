@@ -4,7 +4,7 @@ package_name = "uwb_pozyx_bridge"
 
 setup(
     name=package_name,
-    version="0.1.0",
+    version="0.2.0",
     packages=find_packages(exclude=["test", "tools"]),
     data_files=[
         (
@@ -22,7 +22,9 @@ setup(
         (
             "share/" + package_name + "/tools",
             [
-                "tools/sitl_beacon_monitor.py",
+                "tools/sitl_extnav_monitor.py",
+                "tools/check_extnav_e2e.py",
+                "tools/check_extnav_tracking.py",
                 "tools/compare_positions.py",
                 "tools/inspect_frames.py",
                 "tools/fake_ranging_source.py",
@@ -30,12 +32,13 @@ setup(
             ],
         ),
     ],
-    install_requires=["setuptools", "numpy"],
+    install_requires=["setuptools", "numpy", "pymavlink"],
     zip_safe=True,
     maintainer="an",
     maintainer_email="an@todo.todo",
     description=(
-        "Bridges Gazebo UWB ranging to ArduPilot's Pozyx beacon backend."
+        "Bridges Gazebo UWB ranging to ArduPilot's external navigation "
+        "source via MAVLink ODOMETRY messages."
     ),
     license="Apache-2.0",
     extras_require={
@@ -43,7 +46,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "pozyx_node = uwb_pozyx_bridge.pozyx_node:main",
+            "odometry_node = uwb_pozyx_bridge.odometry_node:main",
         ],
     },
 )

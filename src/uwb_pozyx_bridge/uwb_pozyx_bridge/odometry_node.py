@@ -1,22 +1,29 @@
-"""ROS 2 node bridging Gazebo UWB ranging to ArduPilot's Pozyx backend.
+"""ROS 2 node bridging Gazebo UWB ranging to ArduPilot's external navigation.
 
-The node plays the role of the ``IndoorLoiter.ino`` Arduino sketch:
+The node turns the UWB ranges published by the ``uwb_gz_plugin`` into a
+vehicle position and sends it to ArduPilot as a MAVLink ``ODOMETRY`` message
+(id 331) over a serial port.
+
+ArduPilot's ``AP_VisualOdom`` backend consumes that message and forwards the
+position to EKF3 as an *external navigation* (EXTNAV) measurement, which
+makes it the direct replacement for the old Pozyx ``AP_Beacon`` backend.
+
+The pipeline is:
 
 1. Subscribe to the ranging messages published by the ``uwb_gz_plugin``.
 2. Solve for the tag position by weighted least squares.
-3. Pack the results into the Pozyx binary protocol and send them to the
-   ArduPilot SITL serial port over TCP.
+3. Convert the position from the Gazebo ENU frame to the NED frame that
+   ArduPilot expects and send it as an ``ODOMETRY`` message.
 
-Both the beacon configuration and the vehicle position are sent, mirroring the
-reference sketch.  The distances are sent **continuously** at the configured
-rate, keeping the last known value for an anchor when a fresh ranging is not
-available, because the EKF needs a continuous stream of measurements before
-it will align to the beacon system.
+Only the position is transmitted.  The velocity fields of an ``ODOMETRY``
+message are interpreted by ArduPilot in the body FRD frame, and the UWB
+ranging data does not provide a velocity estimate, so they are left at zero
+and the EKF velocity source stays disabled (``EK3_SRC1_VELXY = 0``).
 
 .. warning::
-   The vehicle position accuracy is sent in **metres**, not millimetres.
-   See :func:`uwb_pozyx_bridge.pozyx_protocol.encode_vehicle_position` for the
-   upstream unit mismatch this works around.
+   The position of an ``ODOMETRY`` message is **not** transformed by
+   ArduPilot; it is fused into the EKF as it arrives, and the EKF works in
+   NED.  See :mod:`uwb_pozyx_bridge.mavlink_odometry` for the details.
 """
 
 from __future__ import annotations
@@ -32,22 +39,23 @@ from geometry_msgs.msg import Pose, PoseStamped
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
-from .pozyx_protocol import (
-    encode_beacon_config,
-    encode_beacon_distance,
-    encode_vehicle_position,
-    enu_to_wire_mm,
-)
-from .pozyx_sender import PozyxSender
+from .mavlink_odometry import build_odometry_message, enu_to_ned_m
+from .mavlink_sender import MavlinkSender
 from .trilateration import Anchor, RangeMeasurement, solve_position
 from .uwb_decoding import DEFAULT_ANCHOR_OFFSETS_MM, decode_ranging_pose
 
+#: A position change larger than this between two fixes is treated as a
+#: discontinuity and bumps the MAVLink reset counter.  The default is well
+#: above the noise of the UWB solution, because a spurious reset makes the
+#: EKF drop its velocity estimate.
+DEFAULT_RESET_JUMP_THRESHOLD_M = 2.0
 
-class PozyxBridgeNode(Node):
-    """Reads UWB ranging and drives the ArduPilot Pozyx beacon backend."""
+
+class OdometryBridgeNode(Node):
+    """Reads UWB ranging and drives ArduPilot's external navigation."""
 
     def __init__(self) -> None:
-        super().__init__("pozyx_node")
+        super().__init__("odometry_node")
 
         # ----- parameters -----
         self.declare_parameter("input_topic", "/uwb/ranging_ros")
@@ -73,22 +81,34 @@ class PozyxBridgeNode(Node):
         self.declare_parameter("tag_altitude_mm", 0.0)
         self.declare_parameter("initial_guess", [0.0, 0.0, 0.0])
 
-        # Accuracy estimate in metres.  ArduPilot's Pozyx backend forwards
-        # this value to the EKF unchanged, and the EKF compares it against a
-        # 1.0 m threshold, so it has to be in metres.
-        self.declare_parameter("position_accuracy_m", 0.05)
+        # Standard deviation of the position estimate, in metres.  ArduPilot
+        # derives the measurement noise from the covariance matrix of the
+        # ODOMETRY message, so this value ends up as the variance of the
+        # position entries.
+        self.declare_parameter("position_std_m", 0.05)
+
+        # Quality of the estimate, 0 to 100.  ArduPilot only forwards a
+        # message to the EKF when the quality is at least VISO_QUAL_MIN.
+        self.declare_parameter("quality", 50)
+
+        # A position change larger than this between two fixes bumps the
+        # MAVLink reset counter, which makes the EKF re-align instead of
+        # fusing the jump as a large innovation.
+        self.declare_parameter(
+            "reset_jump_threshold_m", DEFAULT_RESET_JUMP_THRESHOLD_M
+        )
 
         # Output rate.
         self.declare_parameter("send_rate", 20.0)
-        self.declare_parameter("config_interval", 1.0)
 
         # ----- members -----
         self._lock = threading.Lock()
         self._anchors = self._load_anchors()
         self._ranges: dict[int, RangeMeasurement] = {}
-        self._last_config_send = 0.0
         self._last_solution = None
         self._num_solutions = 0
+        self._reset_counter = 0
+        self._last_sent_position: Optional[tuple[float, float, float]] = None
 
         # ----- QoS -----
         # The C++ bridge publishes with best-effort reliability so that any
@@ -113,7 +133,7 @@ class PozyxBridgeNode(Node):
         )
 
         # ----- transport -----
-        self._sender = PozyxSender(
+        self._sender = MavlinkSender(
             host=self.get_parameter("serial_host").value,
             port=int(self.get_parameter("serial_port").value),
         )
@@ -123,7 +143,7 @@ class PozyxBridgeNode(Node):
         self._timer = self.create_timer(period, self._send_cycle)
 
         self.get_logger().info(
-            f"pozyx_node ready: anchors={len(self._anchors)} "
+            f"odometry_node ready: anchors={len(self._anchors)} "
             f"input={self.get_parameter('input_topic').value} "
             f"serial={self.get_parameter('serial_host').value}:"
             f"{self.get_parameter('serial_port').value}"
@@ -179,9 +199,7 @@ class PozyxBridgeNode(Node):
     # -------------------------------------------------------------- cycle
 
     def _send_cycle(self) -> None:
-        """One output cycle: solve, encode and transmit."""
-        now = time.monotonic()
-
+        """One output cycle: solve, convert and transmit."""
         with self._lock:
             ranges = list(self._ranges.values())
 
@@ -209,72 +227,65 @@ class PozyxBridgeNode(Node):
         self._num_solutions += 1
         self._publish_pose(result)
 
-        frames = bytearray()
-
-        # The anchor configuration is re-sent periodically so that a restarted
-        # ArduPilot process picks it up again.
-        config_interval = float(self.get_parameter("config_interval").value)
-        if now - self._last_config_send >= config_interval:
-            self._last_config_send = now
-            for anchor in self._anchors:
-                # The anchors are known in the Gazebo ENU frame; the wire
-                # wants North/East/Up, so the horizontal axes are swapped
-                # here.  Getting this wrong mirrors the whole beacon
-                # system across the diagonal and the EKF ends up flying to
-                # a reflected position.
-                n_mm, e_mm, u_mm = enu_to_wire_mm(*anchor.position)
-                frames += encode_beacon_config(
-                    anchor.id,
-                    len(self._anchors),
-                    n_mm,
-                    e_mm,
-                    u_mm,
-                )
-
-        # Distances, one frame per anchor.
-        for anchor in self._anchors:
-            measurement = self._latest_range(anchor.id)
-            if measurement is None:
-                continue
-            frames += encode_beacon_distance(
-                anchor.id, int(round(measurement.range_m * 1000.0))
-            )
-
-        # The vehicle position fix.  The trilateration result is in the
-        # Gazebo ENU frame, so the horizontal axes are swapped on the way
-        # out (see the module docstring of pozyx_protocol).
+        # The trilateration result is in the Gazebo ENU frame; ArduPilot
+        # fuses the ODOMETRY position as-is in NED, so the horizontal axes
+        # are swapped and the vertical axis is flipped here.
         z_m = (
             float(self.get_parameter("tag_altitude_mm").value) / 1000.0
             if bool(self.get_parameter("assume_constant_z").value)
             else result.position[2]
         )
-        n_mm, e_mm, u_mm = enu_to_wire_mm(
+        north_m, east_m, down_m = enu_to_ned_m(
             result.position[0], result.position[1], z_m
         )
-        frames += encode_vehicle_position(
-            n_mm,
-            e_mm,
-            u_mm,
-            int(round(float(self.get_parameter("position_accuracy_m").value))),
-        )
 
-        self._sender.send(bytes(frames))
+        self._detect_reset(north_m, east_m, down_m)
+
+        message = build_odometry_message(
+            north_m,
+            east_m,
+            down_m,
+            time.time_ns() // 1000,
+            position_std_m=float(self.get_parameter("position_std_m").value),
+            quality=int(self.get_parameter("quality").value),
+            reset_counter=self._reset_counter,
+        )
+        self._sender.send(message)
 
         # Periodic diagnostics.
         if self._num_solutions % 200 == 1:
             self.get_logger().info(
                 f"tx: solutions={self._num_solutions} "
-                f"frames_sent={self._sender.frames_sent} "
-                f"dropped={self._sender.frames_dropped} "
-                f"pos=({result.position[0]:.3f}, {result.position[1]:.3f}, "
-                f"{result.position[2]:.3f}) "
+                f"messages_sent={self._sender.messages_sent} "
+                f"dropped={self._sender.messages_dropped} "
+                f"ned=({north_m:.3f}, {east_m:.3f}, {down_m:.3f}) "
                 f"anchors={result.used_anchor_ids}"
             )
 
-    def _latest_range(self, anchor_id: int) -> Optional[RangeMeasurement]:
-        """The most recent range measurement for an anchor."""
-        with self._lock:
-            return self._ranges.get(anchor_id)
+    def _detect_reset(
+        self, north_m: float, east_m: float, down_m: float
+    ) -> None:
+        """Bump the reset counter when the position jumps discontinuously.
+
+        ArduPilot uses the counter to know that the external navigation
+        estimate was reset, so that it re-aligns instead of fusing the jump
+        as a large innovation.
+        """
+        position = (north_m, east_m, down_m)
+        previous = self._last_sent_position
+        self._last_sent_position = position
+
+        if previous is None:
+            return
+
+        jump = math.dist(position, previous)
+        threshold = float(self.get_parameter("reset_jump_threshold_m").value)
+        if jump > threshold:
+            self._reset_counter = (self._reset_counter + 1) % 256
+            self.get_logger().warn(
+                f"position jump of {jump:.3f} m detected; "
+                f"bumping the reset counter to {self._reset_counter}"
+            )
 
     # -------------------------------------------------------------- output
 
@@ -298,7 +309,7 @@ class PozyxBridgeNode(Node):
 
 def main(args: Optional[list[str]] = None) -> int:
     rclpy.init(args=args)
-    node = PozyxBridgeNode()
+    node = OdometryBridgeNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

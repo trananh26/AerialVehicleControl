@@ -163,11 +163,23 @@ ATC_RAT_YAW_D    0.000
 MOT_THST_HOVER   0.48
 
 # ===========================================================================
-# 3. Pozyx UWB beacon system
+# 3. UWB positioning via MAVLink ODOMETRY (external navigation)
 #
-# Based on ArduPilot's Tools/autotest/default_params/copter-beacon.parm, with
-# BCN_TYPE changed from 10 (built-in SITL beacon simulator) to 1 (Pozyx
-# backend, fed over a serial port by the Python node).
+# The UWB trilateration result is sent to ArduPilot as a MAVLink ODOMETRY
+# message (id 331) over SERIAL1.  ArduPilot's AP_VisualOdom backend consumes
+# it and forwards the position to EKF3 as an "external navigation" (EXTNAV)
+# measurement.
+#
+# Two upstream behaviours drive the parameter choices below:
+#
+# 1. GCS_MAVLINK::handle_odometry() rejects the message unless
+#    frame_id == MAV_FRAME_LOCAL_FRD and child_frame_id == MAV_FRAME_BODY_FRD.
+#    The companion node therefore always sends those two frames, with the
+#    position expressed in NED (north/east/down) as ArduPilot expects.
+#
+# 2. The beacon backend is no longer used, so BCN_TYPE is disabled.  It is
+#    left in the file with value 0 so that a stale value from a previous boot
+#    cannot re-enable it.
 #
 # NOTE: this ArduPilot build (55ae8d2825) uses the ARMING_CHECK bitmask;
 # there is no ARMING_SKIPCHK parameter.  The upstream instruction
@@ -175,20 +187,41 @@ MOT_THST_HOVER   0.48
 # ARMING_CHECK = 0xFFFFF with the "GPS lock" bit (bit 3, value 8) cleared,
 # i.e. every other arming check stays enabled.
 
-# --- Beacon system ---
-BCN_TYPE 1
-BCN_ALT 584
-BCN_LATITUDE -35.363261
-BCN_LONGITUDE 149.165230
-# Heading from the beacon origin anchor to the 2nd anchor, in degrees.
-# The simulated anchor layout is axis aligned with north, so this is 0.
-BCN_ORIENT_YAW 0
+# --- Beacon system: disabled, the position now comes over MAVLink ---
+BCN_TYPE 0
 
-# --- EKF3: use the beacon system as the primary position source ---
+# --- Visual odometry / external navigation backend ---
+# VISO_TYPE 1 selects the MAVLink backend (AP_VisualOdom_MAV), which is the
+# one that consumes ODOMETRY (331).  VISO_TYPE 0 (None) disables it, and the
+# EKF refuses to arm with EK3_SRC1_POSXY = EXTNAV while it is disabled.
+VISO_TYPE 1
+# Transport delay between the UWB fix and the EKF fusion, in milliseconds.
+VISO_DELAY_MS 50
+# Position measurement noise floor, in metres.  ArduPilot derives the
+# measurement noise from the covariance of the ODOMETRY message and then
+# clamps it to at least this value, so this is what determines the EKF
+# measurement variance for a well-behaved UWB solution.  Note that the
+# upstream formula squares the (already squared) covariance entries, so the
+# derived error is smaller than the real standard deviation; the floor is
+# what keeps the EKF from becoming over-confident about the fix.
+VISO_POS_M_NSE 0.05
+# Velocity measurement noise, in m/s.  Only relevant when velocities are
+# actually sent; the node sends position only, so this is left at its default.
+VISO_VEL_M_NSE 0.1
+# Minimum quality of an accepted message.  0 accepts messages with unknown
+# quality, which is what the node sends.
+VISO_QUAL_MIN 0
+
+# --- EKF3: use the external navigation system as the primary position source ---
 EK3_ENABLE 1
 EK2_ENABLE 0
-EK3_SRC1_POSXY 4
+# EK3_SRC1_POSXY: 6 = EXTNAV (external navigation), replacing 4 = BEACON.
+EK3_SRC1_POSXY 6
+# Height still comes from the barometer, so the node only has to send x/y.
 EK3_SRC1_POSZ 1
+# The node does not send a velocity estimate, so no velocity source is
+# selected.  Setting this to 6 (EXTNAV) would make the EKF fuse the
+# velocities of the ODOMETRY message, which are all zero here.
 EK3_SRC1_VELXY 0
 EK3_SRC1_VELZ 0
 EK3_SRC1_YAW 1
@@ -198,13 +231,13 @@ AHRS_EKF_TYPE 3
 GPS1_TYPE 0
 GPS2_TYPE 0
 
-# --- Serial port used by the Pozyx backend ---
-# SerialProtocol_Beacon = 13.  Set in the defaults file so the serial port is
-# opened with the beacon protocol from the very first boot; changing
+# --- Serial port used by the MAVLink external navigation link ---
+# SerialProtocol_MAVLink = 1.  Set in the defaults file so the serial port is
+# opened with the MAVLink protocol from the very first boot; changing
 # SERIALx_PROTOCOL at runtime requires the EKF to be reinitialised.
-SERIAL1_PROTOCOL 13
-SERIAL1_BAUD 115
-# No hardware flow control on the beacon port.
+SERIAL1_PROTOCOL 1
+SERIAL1_BAUD 115200
+# No hardware flow control on the navigation port.
 BRD_SER1_RTSCTS 0
 
 # --- Arming checks ---

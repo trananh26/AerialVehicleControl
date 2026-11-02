@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify the whole x500 UWB + Pozyx pipeline.
+# Verify the whole x500 UWB + external navigation pipeline.
 #
 # The pipeline is brought up by a single launch file, which is the same one
 # that is used for interactive work:
@@ -31,7 +31,7 @@ cleanup() {
     pkill -f "x500_uwb_runway.launch.py" 2>/dev/null
     pkill -f "gz sim.*uwb_runway" 2>/dev/null
     pkill -f uwb_gz_to_ros_bridge 2>/dev/null
-    pkill -f uwb_pozyx_bridge.pozyx_node 2>/dev/null
+    pkill -f uwb_pozyx_bridge.odometry_node 2>/dev/null
     pkill -f compare_positions 2>/dev/null
     pkill -f verify_fdm_coupling 2>/dev/null
     pkill -f "arducopter --model json" 2>/dev/null
@@ -53,11 +53,11 @@ stdbuf -oL -eL timeout $((SETTLE + 300)) \
 LAUNCH_PID=$!
 
 # Wait for the EKF to have a position estimate and for MAVProxy to be
-# forwarding.  The beacon frames start flowing once the Pozyx node has
-# connected to SITL's serial port.
+# forwarding.  The ODOMETRY messages start flowing once the odometry node
+# has connected to SITL's serial port.
 echo "=== waiting for the stack to come up ==="
 for _ in $(seq 1 60); do
-    if grep -q "is using range beacons" "$LOG" 2>/dev/null; then
+    if grep -q "is using external nav data" "$LOG" 2>/dev/null; then
         break
     fi
     if ! kill -0 "$LAUNCH_PID" 2>/dev/null; then
@@ -67,12 +67,12 @@ for _ in $(seq 1 60); do
     sleep 2
 done
 
-if ! grep -q "is using range beacons" "$LOG" 2>/dev/null; then
-    echo "the EKF never switched to the range beacons, see $LOG"
+if ! grep -q "is using external nav data" "$LOG" 2>/dev/null; then
+    echo "the EKF never switched to the external nav data, see $LOG"
     tail -40 "$LOG"
     exit 1
 fi
-echo "the EKF is using the range beacons"
+echo "the EKF is using the external nav data"
 
 # ---------------------------------------------------------------------
 # Gate 1: the three position sources agree.
@@ -125,8 +125,8 @@ PYEOF
 GCS_STATUS=$?
 
 echo
-echo "############ LAUNCH LOG (beacon and error lines) ############"
-grep -E "origin set|range beacons|initial pos|initial beacon|error|Error|ERROR|Traceback" \
+echo "############ LAUNCH LOG (extnav and error lines) ############"
+grep -E "origin set|external nav|initial pos|initial vel|error|Error|ERROR|Traceback" \
     "$LOG" | tail -25
 
 echo

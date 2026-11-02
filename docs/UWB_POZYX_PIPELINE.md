@@ -1,5 +1,16 @@
 # Đánh giá pipeline UWB → Pozyx → ArduPilot SITL
 
+> ⚠️ **Tài liệu lịch sử.** File này mô tả pipeline dùng protocol Pozyx
+> (`AP_Beacon`), đã bị thay thế bởi pipeline MAVLink `ODOMETRY` (id 331) +
+> `AP_VisualOdom` (EXTNAV).
+>
+> - Kiến trúc hiện hành: **`UWB_ARCHITECTURE.md`**
+> - Pipeline Pozyx cũ đã bị xóa khỏi codebase (`pozyx_node.py`,
+>   `pozyx_protocol.py`, `pozyx_sender.py`, `sitl_beacon_monitor.py`).
+>
+> Giữ lại file này để tham khảo lịch sử phân tích và các rủi ro đã xác minh
+> bằng đọc source ArduPilot.
+
 > Tài liệu này ghi lại đánh giá kiến trúc, các rủi ro đã xác minh bằng đọc source
 > ArduPilot, và roadmap triển khai.
 > Ngày lập: 2026-10-26. Commit ArduPilot: `55ae8d2825` (ArduCopter-stable-2).

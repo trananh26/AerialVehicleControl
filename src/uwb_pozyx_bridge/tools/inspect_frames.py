@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """Step 5.2 gate checker: inspects the frame mapping of the UWB pipeline.
 
-Reads the ranging stream and the tag pose, then shows what the Pozyx bridge
-node would put on the wire, without sending anything.  This separates the
-frame arithmetic from the ArduPilot side, so a mapping mistake shows up
-here rather than as a badly-placed EKF estimate.
+Reads the ranging stream and the tag pose, then shows what the odometry
+node would put into the MAVLink ODOMETRY message, without sending anything.
+This separates the frame arithmetic from the ArduPilot side, so a mapping
+mistake shows up here rather than as a badly-placed EKF estimate.
 
 The chain being checked:
 
     Gazebo world (ENU, m)
         minus the beacon origin
     beacon-relative (ENU, m)
-        times 1000
-    Pozyx wire (mm, North/East/Up)
-        AP_Beacon_Pozyx flips the sign of z
+        swapped into North/East
     ArduPilot (NED, m)
+        the ODOMETRY position is fused as-is, with no further rotation
 
-Note the horizontal swap: the wire frame is North-first while Gazebo is
-East-first, so the two horizontal fields are exchanged on the way out.
+Note the horizontal swap: ArduPilot's NED frame is North-first while
+Gazebo is East-first, so the two horizontal fields are exchanged on the
+way out.
 
 Usage::
 
@@ -28,10 +28,8 @@ from __future__ import annotations
 
 import argparse
 import os
-import statistics
 import sys
 import time
-from collections import defaultdict
 
 import rclpy
 from geometry_msgs.msg import Pose
@@ -50,11 +48,11 @@ sys.path.insert(
     ),
 )
 
-from uwb_pozyx_bridge.pozyx_protocol import (  # noqa: E402
-    encode_beacon_config,
-    encode_beacon_distance,
-    encode_vehicle_position,
-    enu_to_wire_mm,
+from uwb_pozyx_bridge.mavlink_odometry import (  # noqa: E402
+    MAV_FRAME_BODY_FRD,
+    MAV_FRAME_LOCAL_FRD,
+    build_odometry_message,
+    enu_to_ned_m,
 )
 from uwb_pozyx_bridge.trilateration import (  # noqa: E402
     Anchor,
@@ -117,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument(
-        "--position-accuracy-m", type=float, default=0.05,
+        "--position-std-m", type=float, default=0.05,
     )
     args = parser.parse_args(argv)
 
@@ -220,79 +218,76 @@ def main(argv: list[str] | None = None) -> int:
             print("  note: the vehicle is not exactly at the beacon origin, "
                   "so a non-zero position is expected")
 
-        # --- the frames that would go on the wire -----------------------
+        # --- the ODOMETRY message that would be sent -------------------
         z_m = 0.0
-        n_mm, e_mm, u_mm = enu_to_wire_mm(pos[0], pos[1], z_m)
-        accuracy = int(round(args.position_accuracy_m))
+        north_m, east_m, down_m = enu_to_ned_m(pos[0], pos[1], z_m)
+        std_m = args.position_std_m
 
         print()
-        print("=== Pozyx frames that would be sent ===")
+        print("=== ODOMETRY message that would be sent ===")
 
-        frames = bytearray()
-        for anchor in anchors:
-            an, ae, au = enu_to_wire_mm(*anchor.position)
-            frames += encode_beacon_config(
-                anchor.id,
-                len(anchors),
-                an,
-                ae,
-                au,
-            )
-        for anchor in anchors:
-            measurement = node.ranges.get(anchor.id)
-            if measurement is None:
-                continue
-            frames += encode_beacon_distance(
-                anchor.id, int(round(measurement.range_m * 1000.0))
-            )
-        frames += encode_vehicle_position(n_mm, e_mm, u_mm, accuracy)
+        message = build_odometry_message(
+            north_m,
+            east_m,
+            down_m,
+            int(time.time() * 1e6),
+            position_std_m=std_m,
+        )
+        print(f"  msgid            = {message._header.msgId}")
+        print(f"  frame_id         = {message.frame_id} (LOCAL_FRD)")
+        print(f"  child_frame_id   = {message.child_frame_id} (BODY_FRD)")
+        print(f"  x (north)        = {message.x:+.3f} m")
+        print(f"  y (east)         = {message.y:+.3f} m")
+        print(f"  z (down)         = {message.z:+.3f} m")
+        print(f"  quality          = {message.quality}")
+        print(
+            f"  pose_covariance[0]  = {message.pose_covariance[0]:.6f}  "
+            f"(= {std_m}^2)"
+        )
+        print(f"  pose_covariance[6]  = {message.pose_covariance[6]:.6f}")
+        print(f"  pose_covariance[11] = {message.pose_covariance[11]:.6f}")
 
-        for frame in _split_frames(bytes(frames)):
-            msg_id, payload = frame
-            print(f"  msg 0x{msg_id:02X}  payload {payload.hex(' ')}")
-
-        print()
-        print("=== decode of the vehicle position frame ===")
-        print(f"  wire x = {n_mm} mm  (North)")
-        print(f"  wire y = {e_mm} mm  (East)")
-        print(f"  wire z = {u_mm} mm  (Up)")
-        print(f"  position_error = {accuracy}  (metres, workaround R2)")
-        if accuracy >= 1:
+        if message.frame_id != MAV_FRAME_LOCAL_FRD:
             failures.append(
-                f"position_error {accuracy} is not below the 1.0 threshold "
-                "the EKF applies, so the EKF would refuse to align"
+                f"frame_id {message.frame_id} is not MAV_FRAME_LOCAL_FRD; "
+                "ArduPilot rejects the message"
+            )
+        if message.child_frame_id != MAV_FRAME_BODY_FRD:
+            failures.append(
+                f"child_frame_id {message.child_frame_id} is not "
+                "MAV_FRAME_BODY_FRD; ArduPilot rejects the message"
             )
 
         # --- what ArduPilot will make of it ----------------------------
         print()
-        print("=== what AP_Beacon_Pozyx hands to the EKF ===")
-        print(f"  NED north = {n_mm / 1000.0:+.3f} m")
-        print(f"  NED east  = {e_mm / 1000.0:+.3f} m")
-        print(f"  NED down  = {-u_mm / 1000.0:+.3f} m")
-        print("  (the wire is North/East/Up; ArduPilot flips z itself)")
+        print("=== what AP_VisualOdom hands to the EKF ===")
+        print(f"  EXTNAV north = {north_m:+.3f} m")
+        print(f"  EXTNAV east  = {east_m:+.3f} m")
+        print(f"  EXTNAV down  = {down_m:+.3f} m")
+        print("  (the ODOMETRY position is fused as-is, in NED)")
 
         # --- the frame check that matters -------------------------------
         # ArduPilot's NED frame is the Gazebo frame rotated into NED, and
         # for this world that means North = Gazebo +Y and East = Gazebo +X.
-        # If the wire encoding ever stops swapping the horizontal axes
-        # again, the EKF position ends up mirrored across the diagonal and
-        # the drone flies to a reflected location.
+        # If the conversion ever stops swapping the horizontal axes again,
+        # the EKF position ends up mirrored across the diagonal and the
+        # drone flies to a reflected location.
         print()
         print("=== frame consistency check ===")
         expected_north = pos[1]
         expected_east = pos[0]
-        north_err = abs(n_mm / 1000.0 - expected_north)
-        east_err = abs(e_mm / 1000.0 - expected_east)
+        north_err = abs(north_m - expected_north)
+        east_err = abs(east_m - expected_east)
         print(f"  expected NED north (Gazebo +Y): {expected_north:+.3f} m")
         print(f"  expected NED east  (Gazebo +X): {expected_east:+.3f} m")
         print(f"  north error {north_err:.3f} m, east error {east_err:.3f} m")
         if north_err > 0.001 or east_err > 0.001:
             failures.append(
-                "the wire encoding does not map the Gazebo position onto "
+                "the ODOMETRY encoding does not map the Gazebo position onto "
                 "ArduPilot's NED frame"
             )
         else:
-            print("  -> the wire axes agree with ArduPilot's NED frame")
+            print("  -> the ODOMETRY axes agree with ArduPilot's NED frame")
 
     print()
     if failures:

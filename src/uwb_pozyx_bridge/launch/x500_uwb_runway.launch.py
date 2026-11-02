@@ -1,4 +1,4 @@
-"""Launch the x500 UWB + Pozyx pipeline in Gazebo, RViz and ArduPilot SITL.
+"""Launch the x500 UWB + external navigation pipeline in Gazebo, RViz and ArduPilot SITL.
 
 This builds on ``ardupilot_gz_bringup/x500_runway.launch.py`` rather than
 reimplementing it, so the Gazebo GUI, RViz, the Gazebo/ROS bridges, MAVROS
@@ -6,11 +6,12 @@ and MAVProxy all keep working.  On top of that it adds:
 
 * the UWB world with the four anchors (``uwb_runway.sdf``)
 * the gz -> ROS 2 bridge that carries the ranging data
-* the Pozyx bridge node that turns the ranges into beacon frames
-* the MAVLink monitor that applies the beacon parameters
+* the odometry bridge node that turns the ranges into MAVLink ODOMETRY
+  messages for ArduPilot's external navigation (EXTNAV) source
+* the MAVLink monitor that applies the parameters
 
-The vehicle spawns at (5, 5, 0.1), which is the beacon origin, so the beacon
-frames are relative to the spawn point.
+The vehicle spawns at (5, 5, 0.1), which is the UWB origin, so the position
+that is sent to ArduPilot is relative to the spawn point.
 
 Run with::
 
@@ -37,13 +38,13 @@ from launch.substitutions import PathJoinSubstitution
 
 from launch_ros.actions import Node
 
-#: The beacon origin, which is also where the vehicle spawns.
+#: The UWB origin, which is also where the vehicle spawns.
 SPAWN_X = 5.0
 SPAWN_Y = 5.0
 SPAWN_Z = 0.1
 
-#: The serial port SITL listens on for the Pozyx protocol.
-BEACON_SERIAL_PORT = 5761
+#: The serial port SITL listens on for the MAVLink external navigation link.
+NAV_SERIAL_PORT = 5761
 
 #: The name of the Gazebo world, which has to match the <world name="...">
 #: attribute in uwb_runway.sdf.
@@ -78,13 +79,13 @@ def _port_is_free(port: int) -> bool:
 def _check_ports(context):
     """Fail early when a port of the stack is still in use.
 
-    SITL binds its MAVLink port (5760) and the beacon port (5761) and
+    SITL binds its MAVLink port (5760) and the navigation port (5761) and
     exits with "bind failed on port 5760 - Address already in use" when
     they are taken.  That message is easy to miss, and the symptom that
     follows is MAVProxy retrying forever with "link 1 down", which looks
     like a telemetry problem rather than a stale process.
     """
-    busy = [port for port in (5760, BEACON_SERIAL_PORT) if not _port_is_free(port)]
+    busy = [port for port in (5760, NAV_SERIAL_PORT) if not _port_is_free(port)]
     if busy:
         raise RuntimeError(
             "TCP port(s) "
@@ -115,7 +116,8 @@ def generate_launch_description() -> LaunchDescription:
             "y": str(SPAWN_Y),
             "z": str(SPAWN_Z),
             # The merged parameter file replaces the x500 defaults, because
-            # it already contains the x500 tuning plus the beacon settings.
+            # it already contains the x500 tuning plus the external
+            # navigation settings.
             "defaults": _merged_params(),
             # MAVROS is off by default: it is only needed once the vehicle
             # is actually controlled over ROS.
@@ -125,10 +127,10 @@ def generate_launch_description() -> LaunchDescription:
             # /world/runway/...  Without this the joint states never arrive
             # and RViz reports "No transform from [rotor_0] to [odom]".
             "world_name": WORLD_NAME,
-            # SERIAL1 carries the Pozyx beacon protocol.  The ":wait" suffix
-            # makes SITL block until the Pozyx node connects, so no beacon
-            # frame is missed during start-up.
-            "serial1": f"tcp:{BEACON_SERIAL_PORT}:wait",
+            # SERIAL1 carries the MAVLink external navigation link.  The
+            # ":wait" suffix makes SITL block until the odometry node
+            # connects, so no fix is missed during start-up.
+            "serial1": f"tcp:{NAV_SERIAL_PORT}:wait",
         }.items(),
     )
 
@@ -140,27 +142,30 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
     )
 
-    # The Pozyx bridge node: ranging -> trilateration -> beacon frames.
-    pozyx_node = Node(
+    # The odometry bridge node: ranging -> trilateration -> ODOMETRY.
+    odometry_node = Node(
         package="uwb_pozyx_bridge",
-        executable="pozyx_node",
-        name="pozyx_node",
+        executable="odometry_node",
+        name="odometry_node",
         output="screen",
         parameters=[
             {"input_topic": "/uwb/ranging_ros"},
             {"output_pose_topic": "/uwb/pose"},
             {"serial_host": "127.0.0.1"},
-            {"serial_port": BEACON_SERIAL_PORT},
+            {"serial_port": NAV_SERIAL_PORT},
             {"send_rate": 20.0},
-            # Metres, not millimetres: see the R2 workaround in the docs.
-            {"position_accuracy_m": 0.05},
+            # Standard deviation of the position estimate, in metres.  It
+            # is squared to obtain the covariance entries of the ODOMETRY
+            # message, from which ArduPilot derives the EKF measurement
+            # noise.
+            {"position_std_m": 0.05},
         ],
     )
 
-    # The MAVLink monitor, which applies the beacon parameters at runtime.
+    # The MAVLink monitor, which applies the parameters at runtime.
     #
-    # It is off by default, because the beacon parameters already live in
-    # the merged SITL defaults file and are therefore applied on the very
+    # It is off by default, because the parameters already live in the
+    # merged SITL defaults file and are therefore applied on the very
     # first boot.  Running it is also disruptive: SITL's MAVLink port
     # serves a single TCP client at a time, so the monitor competes with
     # MAVProxy for port 5760 and knocks the GCS link down.
@@ -204,16 +209,16 @@ def generate_launch_description() -> LaunchDescription:
             # The monitor connects to SITL's MAVLink port, which is only
             # bound once SITL has finished starting up.
             TimerAction(period=8.0, actions=[monitor]),
-            # The Pozyx node connects to SITL's SERIAL1, which is only bound
-            # once SITL has finished starting up; starting earlier just drops
-            # the first frames.
-            TimerAction(period=14.0, actions=[pozyx_node]),
+            # The odometry node connects to SITL's SERIAL1, which is only
+            # bound once SITL has finished starting up; starting earlier just
+            # drops the first fixes.
+            TimerAction(period=14.0, actions=[odometry_node]),
         ]
     )
 
 
 def _launch_monitor(context):
-    """Start the MAVLink monitor, which applies the beacon parameters."""
+    """Start the MAVLink monitor, which applies the parameters."""
     pkg_bridge = get_package_share_directory("uwb_pozyx_bridge")
     duration = LaunchConfiguration("monitor_duration").perform(context)
 
@@ -222,7 +227,7 @@ def _launch_monitor(context):
             cmd=[
                 "python3",
                 "-u",
-                os.path.join(pkg_bridge, "tools", "sitl_beacon_monitor.py"),
+                os.path.join(pkg_bridge, "tools", "sitl_extnav_monitor.py"),
                 "--mavlink-port",
                 "5760",
                 "--duration",
