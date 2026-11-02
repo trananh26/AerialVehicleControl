@@ -858,6 +858,71 @@ trạng thái `CLIMBING`.
 
 Sửa: so sánh với dung sai (`altitude_tolerance_m = 0.1`).
 
+### R23 — Process cũ sót lại gây quá tải CPU → MAVROS mất kết nối
+
+Khi `ros2 launch` bị kill (`kill -9`, crash, hoặc Ctrl-C không đóng hết), các
+process con của stack **vẫn chạy**: `parameter_bridge`, `robot_state_publisher`,
+`uwb_gz_to_ros_bridge`, `rviz2`, `mavros_node`.
+
+Mỗi process cũ giữ subscription vào cùng topic Gazebo và tiêu tốn **15–20%
+CPU**. Sau nhiều lần chạy, load average lên tới **24+** trên máy 4 core.
+
+Triệu chứng rất dễ nhầm — log báo lỗi liên tục **dù stack mới hoàn toàn bình
+thường**:
+
+```
+[mavros.param]: PR: got an unsolicited param value idx=662, not resetting retries count 2   ← x6500 lần
+[mavros.param]: PR: request param #128 timeout, retries left 2, and 1269 params still missing
+[mavros.sys]:   VER: autopilot version service timeout
+[mavros.mavros]: CON: Lost connection, HEARTBEAT timed out.
+[mavros.cmd]:    CMD: Command 520 -- ack timeout
+```
+
+Nhưng:
+* ArduPilot vẫn báo `Flight battery 100 percent` qua MAVProxy → FCU khỏe
+* `odometry_node` vẫn `dropped=0` → link EKF ổn
+* `/mavros/global_position` báo `lat=0, lon=0` — nhưng đó là **đúng**, vì
+  `GPS1_TYPE 0` không có GPS
+
+Nguyên nhân gốc: máy quá tải → **MAVProxy không relay heartbeat** → MAVROS
+timeout. Không phải lỗi của code.
+
+Dấu hiệu nhận biết: `load average` cao bất thường, và `ps` cho thấy nhiều
+process cùng tên.
+
+Cách xử lý:
+
+```bash
+src/uwb_pozyx_bridge/tools/cleanup_stack.sh
+```
+
+Script dừng toàn bộ stack (SIGTERM rồi SIGKILL cho process còn sót) và báo
+lại load average. Sau đó launch lại sẽ **0 lỗi**.
+
+> Lưu ý: `pkill -f mavproxy.py` / `pkill -f arducopter` **không đủ**. Phải dọn
+> cả `parameter_bridge`, `robot_state_publisher`, `uvb_gz_to_ros_bridge` — đây
+> mới là những process gây ngốn CPU.
+
+### R24 — "ArduPilot controller has reset" là warning vô hại
+
+```
+[gz sim-1] [Wrn] [ArduPilotPlugin.cc:1599] ArduPilot controller has reset
+```
+
+Đây **không** phải lỗi. `ArduPilotPlugin` so sánh frame counter của SITL với
+frame counter nó nhớ:
+
+```cpp
+if (pkt_frame_count < this->dataPtr->fcu_frame_count)
+{
+    /// \todo(anyone) implement re-initialisation
+    gzwarn << "ArduPilot controller has reset\n";
+}
+```
+
+Frame counter bị reset khi SITL khởi động lại (hoặc khi lock-step bị ngắt).
+Message này xuất hiện 1 lần lúc boot là bình thường.
+
 ---
 
 
@@ -1094,7 +1159,7 @@ PIPELINE: PASSED
 
 ```bash
 # Dọn instance cũ trước, nếu không SITL sẽ không bind được port 5760
-pkill -f arducopter; pkill -f mavproxy.py; pkill -f "gz sim"
+pkill -f "x500_uwb_runway"; pkill -f mavros_node; pkill -f odometry_node; pkill -f mavproxy.py; pkill -f arducopter; pkill -f "gz sim"; pkill -f parameter_bridge; pkill -f robot_state_publisher; pkill -f uwb_gz_to_ros_bridge; pkill -f rviz2;
 
 # Launch toàn bộ stack (Gazebo GUI + RViz + SITL + UWB)
 source /opt/ros/humble/setup.bash

@@ -41,7 +41,7 @@ from launch_ros.actions import Node
 #: The UWB origin, which is also where the vehicle spawns.
 SPAWN_X = 5.0
 SPAWN_Y = 5.0
-SPAWN_Z = 0.1
+SPAWN_Z = 0.2
 
 #: The serial port SITL listens on for the MAVLink external navigation link.
 NAV_SERIAL_PORT = 5761
