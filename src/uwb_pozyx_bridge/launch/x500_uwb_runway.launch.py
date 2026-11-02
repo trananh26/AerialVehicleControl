@@ -50,6 +50,14 @@ NAV_SERIAL_PORT = 5761
 #: attribute in uwb_runway.sdf.
 WORLD_NAME = "uwb_runway"
 
+#: The global reference of the UWB world.  ArduPilot needs a global origin
+#: for its EKF even when the position comes from the UWB ranging data,
+#: which is relative to the anchors.  These values match the origin that
+#: the Gazebo world is placed at.
+ORIGIN_LATITUDE_DEG = -35.363262
+ORIGIN_LONGITUDE_DEG = 149.165237
+ORIGIN_ALTITUDE_M = 584.0
+
 
 def _uwb_world_path() -> str:
     """Full path to the UWB world."""
@@ -159,6 +167,14 @@ def generate_launch_description() -> LaunchDescription:
             # message, from which ArduPilot derives the EKF measurement
             # noise.
             {"position_std_m": 0.05},
+            # The global reference of the UWB world.  ArduPilot needs it to
+            # set the EKF origin: the ranging data is relative to the
+            # anchors, so the autopilot cannot derive the origin by itself.
+            # Without an origin it rejects MAV_CMD_NAV_TAKEOFF and the
+            # vehicle arms but never leaves the ground.
+            {"origin_latitude_deg": ORIGIN_LATITUDE_DEG},
+            {"origin_longitude_deg": ORIGIN_LONGITUDE_DEG},
+            {"origin_altitude_m": ORIGIN_ALTITUDE_M},
         ],
     )
 

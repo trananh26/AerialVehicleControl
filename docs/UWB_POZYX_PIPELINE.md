@@ -792,6 +792,75 @@ khi `ros2 topic hz /uwb/pose` vẫn ra 20 Hz.
 
 
 
+### R21 — Guided takeoff cần **cả EKF origin lẫn Home position**
+
+Đây là nguyên nhân gốc khiến drone **arm được nhưng không takeoff được**.
+
+Triệu chứng: `MAV_CMD_NAV_TAKEOFF` bị trả về `MAV_RESULT_FAILED` (ACK 4)
+liên tục, trong khi `MAV_CMD_COMPONENT_ARM_DISARM` vẫn `ACCEPTED`.
+
+Cơ chế (`ArduCopter/mode_guided.cpp`):
+
+```cpp
+bool ModeGuided::do_user_takeoff_start(float takeoff_alt_cm)
+{
+    // interpret altitude as alt-above-home
+    Location target_loc = copter.current_loc;
+    target_loc.set_alt_cm(takeoff_alt_cm, Location::AltFrame::ABOVE_HOME);
+
+    // provide target altitude as alt-above-ekf-origin
+    if (!target_loc.get_alt_cm(Location::AltFrame::ABOVE_ORIGIN, alt_target_cm)) {
+        // this should never happen but we reject the command just in case
+        return false;
+    }
+    ...
+}
+```
+
+`Location::get_alt_cm()` (`AP_Common/Location.cpp`) chuyển đổi giữa hai frame
+và cần **cả hai** mốc:
+
+| Frame cần | Nguồn | Hệ quả khi thiếu |
+|---|---|---|
+| `ABOVE_HOME` | `AP::ahrs().home_is_set()` | `get_alt_cm()` trả `false` |
+| `ABOVE_ORIGIN` | `AP::ahrs().get_origin()` | `get_alt_cm()` trả `false` |
+
+⇒ **Origin một mình là chưa đủ.** Phải có **Home position** mới takeoff được.
+
+Với `GPS1_TYPE 0` (setup indoor, không GPS), ArduPilot **không tự** khởi tạo
+home — home chỉ được set khi có GPS lock. Đó là lý do `origin set` xuất hiện
+trong log (`EKF3 IMU0 origin set`) nhưng takeoff vẫn fail.
+
+**Thứ tự bắt buộc** (ArduPilot từ chối `DO_SET_HOME` khi origin chưa có):
+
+1. `SET_GPS_GLOBAL_ORIGIN` (msg id **48**) — đặt EKF origin.
+   Handler: `GCS_MAVLINK::handle_set_gps_global_origin()` → `set_ekf_origin()`.
+   Chỉ nhận từ GCS sysid (`SYSID_MYGCS` = 255) → phải gửi heartbeat trước.
+2. `MAV_CMD_DO_SET_HOME` (cmd **179**) — đặt home position.
+   Handler: `GCS_MAVLINK::handle_command_do_set_home()` → `Copter::set_home()`.
+   `Copter::set_home()` kiểm tra `ahrs.get_origin()` trước, nên **bắt buộc
+   origin phải có trước**.
+
+Lưu ý thêm: EKF origin **không được persist** qua các lần restart của
+autopilot, còn home thì có. Vì vậy `odometry_node` khai báo lại origin theo
+chu kỳ (`ORIGIN_REFRESH_S`).
+
+Link navigation (SERIAL1) **không trả telemetry ngược lại** cho companion
+node, nên không có `COMMAND_ACK`/`HOME_POSITION` để xác nhận — khai báo được
+lặp lại theo timer thay vì dựa trên phản hồi.
+
+### R22 — ArduPilot settle thấp hơn altitude yêu cầu một chút
+
+Sau `NAV_TAKEOFF` với `param7 = 1.5`, ArduPilot ổn định ở **~1.499m** (đo
+qua `/mavros/local_position/pose`), tức thấp hơn mục tiêu ~1mm. Vì vậy
+điều kiện `current_z >= target_z` **không bao giờ đúng** và mission treo ở
+trạng thái `CLIMBING`.
+
+Sửa: so sánh với dung sai (`altitude_tolerance_m = 0.1`).
+
+---
+
+
 ## 7. Đánh giá mức độ khả thi
 
 **Kết luận: khả thi, đúng kiến trúc, không cần sửa ArduPilot.**

@@ -15,11 +15,17 @@ The frame conventions asserted here mirror ArduPilot's own source:
 import pytest
 
 from uwb_pozyx_bridge.mavlink_odometry import (
+    MAV_CMD_DO_SET_HOME,
+    MAV_CMD_REQUEST_MESSAGE,
     MAV_ESTIMATOR_TYPE_VIO,
     MAV_FRAME_BODY_FRD,
     MAV_FRAME_LOCAL_FRD,
     ODOMETRY_MSG_ID,
+    SET_GPS_GLOBAL_ORIGIN_MSG_ID,
+    build_do_set_home_message,
     build_odometry_message,
+    build_request_message_command,
+    build_set_gps_global_origin_message,
     enu_to_ned_m,
     pose_covariance_1d,
 )
@@ -213,3 +219,96 @@ def test_quality_is_carried():
     msg = build_odometry_message(0.0, 0.0, 0.0, 1_000_000, quality=42)
 
     assert msg.quality == 42
+
+
+# ------------------------------------------------- EKF origin declaration
+
+
+def test_origin_message_id_is_set_gps_global_origin():
+    msg = build_set_gps_global_origin_message(-35.363262, 149.165237, 584.0)
+
+    assert msg._header.msgId == SET_GPS_GLOBAL_ORIGIN_MSG_ID
+    assert SET_GPS_GLOBAL_ORIGIN_MSG_ID == 48
+
+
+def test_origin_latitude_is_in_degrees_times_1e7():
+    """The MAVLink field is an int32 in units of 1e-7 degrees."""
+    msg = build_set_gps_global_origin_message(-35.363262, 149.165237, 584.0)
+
+    assert msg.latitude == pytest.approx(-353632620, abs=1)
+    assert msg.longitude == pytest.approx(1491652370, abs=1)
+
+
+def test_origin_altitude_is_in_millimetres():
+    """The MAVLink field is in mm; ArduPilot divides it by ten for cm."""
+    msg = build_set_gps_global_origin_message(-35.363262, 149.165237, 584.0)
+
+    assert msg.altitude == 584000
+
+
+def test_origin_targets_the_autopilot():
+    msg = build_set_gps_global_origin_message(
+        -35.363262, 149.165237, 584.0, target_system=1
+    )
+
+    assert msg.target_system == 1
+
+
+# -------------------------------------------------- home position command
+
+
+def test_home_command_is_do_set_home():
+    msg = build_do_set_home_message(-35.363262, 149.165237, 584.0)
+
+    assert msg.command == MAV_CMD_DO_SET_HOME
+    assert MAV_CMD_DO_SET_HOME == 179
+
+
+def test_home_command_carries_the_position_in_param5_to_7():
+    """COMMAND_LONG conveys the location in param5/6/7.
+
+    ArduPilot's ``convert_COMMAND_LONG_to_COMMAND_INT()`` moves param5 and
+    param6 into the integer x/y fields (scaled by 1e7) and param7 into z, and
+    it uses ``MAV_FRAME_GLOBAL`` for this command.
+    """
+    msg = build_do_set_home_message(-35.363262, 149.165237, 584.0)
+
+    assert msg.param5 == pytest.approx(-35.363262)
+    assert msg.param6 == pytest.approx(149.165237)
+    assert msg.param7 == pytest.approx(584.0)
+
+
+def test_home_command_does_not_use_the_current_location():
+    """param1 == 0 means "use the given position", not "use the current one".
+
+    ArduPilot's handler branches on ``is_equal(packet.param1, 1.0f)``, so a
+    param1 of 1 would ask the autopilot to use its own position instead.
+    """
+    msg = build_do_set_home_message(-35.363262, 149.165237, 584.0)
+
+    assert msg.param1 == 0.0
+
+
+def test_home_command_targets_the_autopilot():
+    msg = build_do_set_home_message(
+        -35.363262, 149.165237, 584.0, target_system=1, target_component=1
+    )
+
+    assert msg.target_system == 1
+    assert msg.target_component == 1
+
+
+# --------------------------------------------------- message request command
+
+
+def test_request_message_command_is_request_message():
+    msg = build_request_message_command(242)
+
+    assert msg.command == MAV_CMD_REQUEST_MESSAGE
+    assert MAV_CMD_REQUEST_MESSAGE == 512
+
+
+def test_request_message_command_carries_the_message_id():
+    msg = build_request_message_command(242)
+
+    assert msg.param1 == pytest.approx(242.0)

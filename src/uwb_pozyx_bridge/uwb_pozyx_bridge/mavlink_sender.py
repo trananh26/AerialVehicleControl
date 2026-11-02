@@ -21,11 +21,16 @@ import socket
 import threading
 import time
 
-__all__ = ["MavlinkSender"]
+__all__ = ["MavlinkSender", "SYSTEM_ID"]
 
 #: MAVLink system id used by the companion node.  It has to differ from
 #: ArduPilot's own system id (1) so that the message is not mistaken for
 #: the autopilot's own component.
+#:
+#: It does have to match ``SYSID_MYGCS`` (255 by default), because
+#: ``GCS_MAVLINK::accept_packet()`` only accepts packets from the GCS system
+#: id.  Without that, commands such as ``SET_GPS_GLOBAL_ORIGIN`` are
+#: silently dropped.
 SYSTEM_ID = 255
 
 #: MAVLink component id of the companion node.
@@ -41,16 +46,21 @@ class MavlinkSender:
         port: int = 5761,
         reconnect_delay: float = 1.0,
         connect_timeout: float = 2.0,
+        on_message=None,
     ) -> None:
         self.host = host
         self.port = port
         self.reconnect_delay = reconnect_delay
         self.connect_timeout = connect_timeout
+        #: Optional callback invoked with every MAVLink message the
+        #: autopilot sends back over this link.
+        self._on_message = on_message
 
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
         self._last_attempt = 0.0
         self._mav = None
+        self._parser = None
         self._reader: threading.Thread | None = None
         self._stop = threading.Event()
 
@@ -113,12 +123,42 @@ class MavlinkSender:
         """Read and discard whatever the autopilot sends."""
         while not self._stop.is_set():
             try:
-                if not sock.recv(4096):
-                    break
+                data = sock.recv(4096)
             except socket.timeout:
                 continue
             except OSError:
                 break
+            if not data:
+                break
+            self._dispatch_incoming(data)
+
+    def _dispatch_incoming(self, data: bytes) -> None:
+        """Parse incoming MAVLink frames and hand them to the callback.
+
+        The autopilot answers the commands the companion sends with
+        ``COMMAND_ACK`` messages, and it sends ``HOME_POSITION`` once the
+        home position is known.  Both are needed to confirm that the origin
+        and home declarations were accepted, so the frames are parsed
+        instead of being discarded.
+        """
+        if self._on_message is None:
+            return
+
+        from pymavlink.dialects.v20 import common as mavlink
+
+        if self._parser is None:
+            self._parser = mavlink.MAVLink(None, srcSystem=1, srcComponent=1)
+
+        try:
+            messages = self._parser.parse_char(data) or []
+        except Exception:  # noqa: BLE001 - a malformed frame must not kill the link
+            return
+
+        for message in messages:
+            try:
+                self._on_message(message)
+            except Exception:  # noqa: BLE001 - a bad callback must not kill the link
+                continue
 
     def connect(self, timeout: float = 30.0) -> bool:
         """Block until the connection is established or the timeout expires.
@@ -222,3 +262,24 @@ class MavlinkSender:
         data = message.pack(self._mav)
         self._mav.seq = (self._mav.seq + 1) % 256
         return bytes(data)
+
+    # -- housekeeping ---------------------------------------------------
+
+    def send_heartbeat(self) -> bool:
+        """Send a GCS heartbeat to the autopilot.
+
+        ArduPilot uses the heartbeat to associate a system id with a link.
+        Sending one before any command makes sure that the commands are
+        accepted as coming from the GCS system id.
+        """
+        from pymavlink.dialects.v20 import common as mavlink
+
+        message = mavlink.MAVLink_heartbeat_message(
+            mavlink.MAV_TYPE_GCS,
+            mavlink.MAV_AUTOPILOT_INVALID,
+            0,
+            0,
+            mavlink.MAV_STATE_ACTIVE,
+            3,
+        )
+        return self.send(message)

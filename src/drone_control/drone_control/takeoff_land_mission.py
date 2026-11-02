@@ -54,6 +54,12 @@ class TakeoffLandMission(Node):
         self.takeoff_z = 0.0
         self.target_z = 0.0
 
+        # Height of the climb above the take-off point, in metres.
+        self.takeoff_altitude_m = 1.5
+        # ArduPilot's altitude estimate settles a little below the requested
+        # height, so the climb is considered done within this tolerance.
+        self.altitude_tolerance_m = 0.1
+
         # mission state machine
         self.mission_state = self.WAIT_CONN
         self.pending_future = None
@@ -155,7 +161,7 @@ class TakeoffLandMission(Node):
             req.param4 = float('nan')
             req.param5 = 0.0
             req.param6 = 0.0
-            req.param7 = 1.5
+            req.param7 = self.takeoff_altitude_m
             self.pending_future = self.takeoff_client.call_async(req)
             self.get_logger().info("Sending takeoff command...")
             self.mission_state = self.WAIT_TAKEOFF
@@ -168,7 +174,7 @@ class TakeoffLandMission(Node):
             resp = self.pending_future.result()
             if resp and resp.success:
                 self.takeoff_z = self.current_z
-                self.target_z = self.takeoff_z + 1.5
+                self.target_z = self.takeoff_z + self.takeoff_altitude_m
                 self.get_logger().info(f"Takeoff accepted, climbing to {self.target_z:.1f}m...")
                 self.mission_state = self.CLIMBING
             else:
@@ -178,7 +184,14 @@ class TakeoffLandMission(Node):
 
         # --- CLIMBING: wait until altitude reached ---
         if self.mission_state == self.CLIMBING:
-            if self.current_z >= self.target_z:
+            # ArduPilot's altitude estimate settles slightly below the
+            # requested one, so an exact comparison would never be true and
+            # the mission would hang here.  Accept anything within the
+            # tolerance of the target.
+            if self.current_z >= self.target_z - self.altitude_tolerance_m:
+                self.get_logger().info(
+                    f"Reached {self.current_z:.2f}m, sending LAND..."
+                )
                 self.mission_state = self.SEND_LAND
             return
 

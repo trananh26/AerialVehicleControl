@@ -65,9 +65,16 @@ __all__ = [
     "MAV_FRAME_BODY_FRD",
     "MAV_ESTIMATOR_TYPE_VIO",
     "ODOMETRY_MSG_ID",
+    "SET_GPS_GLOBAL_ORIGIN_MSG_ID",
+    "HOME_POSITION_MSG_ID",
+    "MAV_CMD_DO_SET_HOME",
+    "MAV_CMD_REQUEST_MESSAGE",
     "enu_to_ned_m",
     "pose_covariance_1d",
     "build_odometry_message",
+    "build_set_gps_global_origin_message",
+    "build_do_set_home_message",
+    "build_request_message_command",
 ]
 
 #: ``MAV_FRAME_LOCAL_FRD``.  ArduPilot requires this exact value for the
@@ -84,6 +91,22 @@ MAV_ESTIMATOR_TYPE_VIO = 2
 
 #: The MAVLink message id of ODOMETRY.
 ODOMETRY_MSG_ID = 331
+
+#: The MAVLink message id of SET_GPS_GLOBAL_ORIGIN.
+SET_GPS_GLOBAL_ORIGIN_MSG_ID = 48
+
+#: The MAVLink message id of HOME_POSITION.  The autopilot only sends it
+#: once the home position is known, so receiving it is the confirmation that
+#: ``MAV_CMD_DO_SET_HOME`` was accepted.
+HOME_POSITION_MSG_ID = 242
+
+#: ``MAV_CMD_DO_SET_HOME``.  This is the only way to establish the home
+#: position on a vehicle that has no GPS.
+MAV_CMD_DO_SET_HOME = 179
+
+#: ``MAV_CMD_REQUEST_MESSAGE``.  Used to ask the autopilot to re-send
+#: ``HOME_POSITION`` so that the node can verify the home position it set.
+MAV_CMD_REQUEST_MESSAGE = 512
 
 
 def enu_to_ned_m(
@@ -192,4 +215,152 @@ def build_odometry_message(
         reset_counter=int(reset_counter),
         estimator_type=MAV_ESTIMATOR_TYPE_VIO,
         quality=int(quality),
+    )
+
+
+def build_set_gps_global_origin_message(
+    latitude_deg: float,
+    longitude_deg: float,
+    altitude_m: float,
+    target_system: int = 1,
+):
+    """Build a ``MAVLink_set_gps_global_origin_message``.
+
+    ArduPilot needs a *global* reference for its EKF origin, even when the
+    position itself comes from an external navigation system.  Without an
+    origin:
+
+    * ``AP_AHRS::get_origin()`` fails, so the EKF cannot convert its height
+      between the "above origin" and "above home" frames.
+    * ``ModeGuided::do_user_takeoff_start()`` calls
+      ``Location::get_alt_cm(ABOVE_ORIGIN)``, which fails, so
+      ``MAV_CMD_NAV_TAKEOFF`` is answered with ``MAV_RESULT_FAILED`` and the
+      vehicle never leaves the ground.
+
+    The message is handled by ``GCS_MAVLINK::handle_set_gps_global_origin()``,
+    which calls ``GCS_MAVLINK::set_ekf_origin()``.  That helper is
+    deliberately the only path that sets the origin without a GPS: it is
+    documented as "should only be used when there is no GPS to provide an
+    absolute position".
+
+    The message has to arrive from the GCS system id (``SYSID_MYGCS``, 255
+    by default), otherwise ``GCS_MAVLINK::accept_packet()`` drops it.
+
+    Args:
+        latitude_deg: Latitude of the origin, in degrees.
+        longitude_deg: Longitude of the origin, in degrees.
+        altitude_m: Altitude of the origin above mean sea level, in metres.
+            The MAVLink field is in millimetres; ArduPilot divides it by ten
+            to obtain centimetres.
+        target_system: MAVLink system id of the autopilot.
+
+    Returns:
+        A ``pymavlink`` ``MAVLink_set_gps_global_origin_message`` instance.
+    """
+    from pymavlink.dialects.v20 import common as mavlink
+
+    return mavlink.MAVLink_set_gps_global_origin_message(
+        target_system=int(target_system),
+        latitude=int(round(float(latitude_deg) * 1e7)),
+        longitude=int(round(float(longitude_deg) * 1e7)),
+        altitude=int(round(float(altitude_m) * 1000)),
+    )
+
+
+def build_do_set_home_message(
+    latitude_deg: float,
+    longitude_deg: float,
+    altitude_m: float,
+    target_system: int = 1,
+    target_component: int = 1,
+):
+    """Build a ``MAVLink_command_long_message`` that sets the home position.
+
+    The EKF origin is not enough for a guided take-off.  ArduPilot's
+    ``ModeGuided::do_user_takeoff_start()`` interprets the requested altitude
+    as *above home* and then converts it to *above origin*::
+
+        Location target_loc = copter.current_loc;
+        target_loc.set_alt_cm(takeoff_alt_cm, Location::AltFrame::ABOVE_HOME);
+        if (!target_loc.get_alt_cm(Location::AltFrame::ABOVE_ORIGIN, alt_target_cm)) {
+            return false;
+        }
+
+    ``Location::get_alt_cm()`` needs the home altitude to perform that
+    conversion, so it returns false when the home position is unknown and
+    the take-off command is answered with ``MAV_RESULT_FAILED``.  This is
+    why the vehicle arms but never leaves the ground.
+
+    ``MAV_CMD_DO_SET_HOME`` is the documented way to establish the home
+    position on a vehicle without a GPS.  ArduPilot's handler
+    (``GCS_MAVLINK::handle_command_do_set_home()``) checks that the EKF
+    origin is already set before it accepts the command, so the origin has
+    to be declared first.
+
+    The command is conveyed as ``COMMAND_LONG`` here, which means the
+    latitude and longitude go into ``param5``/``param6`` as degrees and the
+    altitude into ``param7`` as metres.  ArduPilot converts the command to a
+    ``COMMAND_INT`` with ``MAV_FRAME_GLOBAL``, which is the frame the
+    handler expects.
+
+    Args:
+        latitude_deg: Latitude of the home position, in degrees.
+        longitude_deg: Longitude of the home position, in degrees.
+        altitude_m: Altitude of the home position above mean sea level, in
+            metres.
+        target_system: MAVLink system id of the autopilot.
+        target_component: MAVLink component id of the autopilot.
+
+    Returns:
+        A ``pymavlink`` ``MAVLink_command_long_message`` instance.
+    """
+    from pymavlink.dialects.v20 import common as mavlink
+
+    return mavlink.MAVLink_command_long_message(
+        target_system=int(target_system),
+        target_component=int(target_component),
+        command=MAV_CMD_DO_SET_HOME,
+        confirmation=0,
+        param1=0.0,
+        param2=0.0,
+        param3=0.0,
+        param4=0.0,
+        param5=float(latitude_deg),
+        param6=float(longitude_deg),
+        param7=float(altitude_m),
+    )
+
+
+def build_request_message_command(
+    message_id: int,
+    target_system: int = 1,
+    target_component: int = 1,
+):
+    """Build a ``MAVLink_command_long_message`` that requests a message.
+
+    Used to ask the autopilot to re-send ``HOME_POSITION`` so that the node
+    can confirm that the home position it set was actually accepted.
+
+    Args:
+        message_id: The MAVLink message id to request.
+        target_system: MAVLink system id of the autopilot.
+        target_component: MAVLink component id of the autopilot.
+
+    Returns:
+        A ``pymavlink`` ``MAVLink_command_long_message`` instance.
+    """
+    from pymavlink.dialects.v20 import common as mavlink
+
+    return mavlink.MAVLink_command_long_message(
+        target_system=int(target_system),
+        target_component=int(target_component),
+        command=MAV_CMD_REQUEST_MESSAGE,
+        confirmation=0,
+        param1=float(message_id),
+        param2=0.0,
+        param3=0.0,
+        param4=0.0,
+        param5=0.0,
+        param6=0.0,
+        param7=0.0,
     )
