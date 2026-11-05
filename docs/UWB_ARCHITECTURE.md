@@ -75,6 +75,8 @@ ArduPilot SITL, gồm các topic, frame, đơn vị và các bước xử lý tr
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
+
+
 ## 2. Tầng 1 — Gazebo UWB plugin (`uwb_gz_plugin`)
 
 Plugin được attach vào **world** (không phải model), vì vậy nó tick mỗi bước
@@ -98,19 +100,23 @@ mô phỏng và tự tìm model xe theo tên.
 </plugin>
 ```
 
+
+
 ### Vòng lặp `PostUpdate()`
 
 1. **Tìm tag** — `EntityByName(tag_model_name)` cho model, rồi `FindLinkEntity()`
-   đệ quy xuống các model con (vì `x500_with_ardupilot` `<include>` `x500_base`,
+  đệ quy xuống các model con (vì `x500_with_ardupilot` `<include>` `x500_base`,
    nên `base_link` nằm trong model lồng nhau).
 2. **Lấy vị trí world** — ưu tiên component `WorldPose`; nếu không có thì
-   `LocalToWorldPose()` cộng dồn `Pose` theo chuỗi cha–con.
+  `LocalToWorldPose()` cộng dồn `Pose` theo chuỗi cha–con.
 3. **Cập nhật anchor** — `RefreshAnchorPositions()` đọc `WorldPose`/`Pose` của
-   từng anchor (anchor có entity thật thì lấy vị trí động, ngược lại giữ vị
+  từng anchor (anchor có entity thật thì lấy vị trí động, ngược lại giữ vị
    trí lúc `Configure()`).
 4. **Tính range** — `ranging_->Compute(tag_world, dt)` → một `RangingResult`
-   cho mỗi anchor, kèm `range`, `rss`, `los`.
+  cho mỗi anchor, kèm `range`, `rss`, `los`.
 5. **Publish** — xem mục 3.
+
+
 
 ### Vị trí tag: `tag_z_offset_`
 
@@ -121,39 +127,47 @@ anchor ở `z = 2.0 m` còn xe ở `z ≈ 0.2 m`, nên range ngang ~7.07 m.
 
 Ba topic, đều là `gz::msgs::Pose` (trừ marker):
 
-| gz topic | Loại | Nội dung |
-| --- | --- | --- |
-| `/uwb/ranging/tag` | `gz::msgs::Pose` | 1 message / anchor / chu kỳ |
-| `/uwb/tag_pose/tag` | `gz::msgs::Pose` | vị trí world của tag |
-| `/uwb/anchors/tag` | `gz::msgs::Marker` | hình cầu tại anchor, màu theo LOS |
+
+| gz topic            | Loại               | Nội dung                          |
+| ------------------- | ------------------ | --------------------------------- |
+| `/uwb/ranging/tag`  | `gz::msgs::Pose`   | 1 message / anchor / chu kỳ       |
+| `/uwb/tag_pose/tag` | `gz::msgs::Pose`   | vị trí world của tag              |
+| `/uwb/anchors/tag`  | `gz::msgs::Marker` | hình cầu tại anchor, màu theo LOS |
+
+
+
 
 ### Encoding của `/uwb/ranging/tag`
 
 Đây là **encoding tùy biến**, không phải pose thật — các field bị dùng lại:
 
-| Field | Ý nghĩa |
-| --- | --- |
-| `position.x` | range tới anchor, **mét** |
-| `position.y` | RSS, **dBm** |
-| `position.z` | `anchor_id` (float) |
+
+| Field           | Ý nghĩa                                         |
+| --------------- | ----------------------------------------------- |
+| `position.x`    | range tới anchor, **mét**                       |
+| `position.y`    | RSS, **dBm**                                    |
+| `position.z`    | `anchor_id` (float)                             |
 | `orientation.x` | LOS code: `0`=LOS, `1`=NLOS soft, `2`=NLOS hard |
-| `orientation.w` | `1.0` (identity) |
-| `name` | tên anchor |
+| `orientation.w` | `1.0` (identity)                                |
+| `name`          | tên anchor                                      |
+
 
 Hai chi tiết quan trọng:
 
 - `<pos>` của `<anchor>` phải là **child element**, không phải attribute
-  (`<anchor name="..." pos="x y z"/>` sẽ bị bỏ qua).
+(`<anchor name="..." pos="x y z"/>` sẽ bị bỏ qua).
 - LOS code **không** được encode thành quaternion roll: giá trị `1` sẽ thành
-  `sin(0.5) = 0.479` và bị Python round về `0`, mất cờ NLOS. Vì vậy plugin ghi
-  thẳng vào `orientation.x`.
+`sin(0.5) = 0.479` và bị Python round về `0`, mất cờ NLOS. Vì vậy plugin ghi
+thẳng vào `orientation.x`.
+
+
 
 ## 4. Tầng 2 — Bridge gz → ROS 2
 
 `uwb_gz_to_ros_bridge` (`src/uwb_gz_plugin/src/ros_gz_bridge_node.cc`) là node
 C++ độc lập, dùng `gz::transport::Node` để subscribe và `rclcpp` để publish.
 
-**Vì sao không dùng `ros_gz_bridge` có sẵn?** Bản `ros_gz_bridge` 0.244 trong
+**Vì sao không dùng** `ros_gz_bridge` **có sẵn?** Bản `ros_gz_bridge` 0.244 trong
 workspace này bị lỗi factory lookup khi bridge `gz.msgs.Pose` →
 `geometry_msgs/msg/Pose`, nên phải tự viết node.
 
@@ -170,21 +184,25 @@ Node Python nhận ranging, giải vị trí, đóng gói MAVLink `ODOMETRY`, g�
 
 ### 5.1 Tham số quan trọng
 
-| Tham số | Mặc định | Ý nghĩa |
-| --- | --- | --- |
-| `input_topic` | `/uwb/ranging_ros` | topic ranging đầu vào |
-| `output_pose_topic` | `/uwb/pose` | topic debug vị trí giải được |
-| `serial_host` / `serial_port` | `127.0.0.1` / `5761` | endpoint TCP tới SITL |
-| `send_rate` | `20.0` | nhịp gửi message (Hz) |
-| `anchor_count` | `4` | số anchor |
-| `anchor_offsets_mm` | `(-5000,-5000,1900)`, … | vị trí anchor **tương đối UWB origin**, mm |
-| `position_std_m` | `0.05` | **độ lệch chuẩn** của estimate vị trí, mét |
-| `quality` | `50` | quality gửi kèm (0–100) |
-| `reset_jump_threshold_m` | `2.0` | ngưỡng nhảy vị trí để bump reset counter |
-| `assume_constant_z` | `True` | giữ altitude cố định |
-| `min_anchors` | `3` | số anchor tối thiểu để có lời giải |
-| `max_range` | `50.0` | loại bỏ range vượt ngưỡng |
-| `los_std` / `nlos_soft_std` / `nlos_hard_std` | `0.10` / `0.30` / `0.60` | nhiễu theo LOS (m) |
+
+| Tham số                                       | Mặc định                 | Ý nghĩa                                    |
+| --------------------------------------------- | ------------------------ | ------------------------------------------ |
+| `input_topic`                                 | `/uwb/ranging_ros`       | topic ranging đầu vào                      |
+| `output_pose_topic`                           | `/uwb/pose`              | topic debug vị trí giải được               |
+| `serial_host` / `serial_port`                 | `127.0.0.1` / `5761`     | endpoint TCP tới SITL                      |
+| `send_rate`                                   | `20.0`                   | nhịp gửi message (Hz)                      |
+| `anchor_count`                                | `4`                      | số anchor                                  |
+| `anchor_offsets_mm`                           | `(-5000,-5000,1900)`, …  | vị trí anchor **tương đối UWB origin**, mm |
+| `position_std_m`                              | `0.05`                   | **độ lệch chuẩn** của estimate vị trí, mét |
+| `quality`                                     | `50`                     | quality gửi kèm (0–100)                    |
+| `reset_jump_threshold_m`                      | `2.0`                    | ngưỡng nhảy vị trí để bump reset counter   |
+| `assume_constant_z`                           | `True`                   | giữ altitude cố định                       |
+| `min_anchors`                                 | `3`                      | số anchor tối thiểu để có lời giải         |
+| `max_range`                                   | `50.0`                   | loại bỏ range vượt ngưỡng                  |
+| `los_std` / `nlos_soft_std` / `nlos_hard_std` | `0.10` / `0.30` / `0.60` | nhiễu theo LOS (m)                         |
+
+
+
 
 ### 5.2 Vòng lặp gửi (`_send_cycle`, 20 Hz)
 
@@ -212,6 +230,8 @@ build_odometry_message(...)        # MAVLink ODOMETRY (id 331)
 MavlinkSender.send(message)        # 1 lần write, ~245 byte
 ```
 
+
+
 ### 5.3 Trọng số WLS
 
 `RangeMeasurement.weight()` suy ra variance từ LOS code cộng thêm một hạng tử
@@ -226,6 +246,8 @@ sigma *= rss_term
 return 1.0 / (sigma * sigma)
 ```
 
+
+
 ### 5.4 Vì sao `assume_constant_z = True`
 
 Anchor nằm cùng một mặt phẳng (z = 2.0 m). Nếu giải full-3D, bài toán
@@ -233,6 +255,8 @@ trilateration có **hai nghiệm** đối xứng qua mặt phẳng anchor, và s
 thể nhảy sang nghiệm sai. Giữ z cố định loại bỏ luôn nguồn sai này.
 
 ## 6. Tầng 4 — MAVLink `ODOMETRY` (id 331)
+
+
 
 ### 6.1 Hai ràng buộc frame của ArduPilot
 
@@ -246,17 +270,19 @@ if (m.frame_id != MAV_FRAME_LOCAL_FRD ||
 }
 ```
 
-| Trường | Hằng số | Giá trị |
-| --- | --- | --- |
-| `frame_id` | `MAV_FRAME_LOCAL_FRD` | 20 |
-| `child_frame_id` | `MAV_FRAME_BODY_FRD` | 12 |
+
+| Trường           | Hằng số               | Giá trị |
+| ---------------- | --------------------- | ------- |
+| `frame_id`       | `MAV_FRAME_LOCAL_FRD` | 20      |
+| `child_frame_id` | `MAV_FRAME_BODY_FRD`  | 12      |
+
 
 Hai giá trị này được hard-code trong `mavlink_odometry.py` và **không** cấu
 hình được.
 
 ### 6.2 Quy ước vị trí: NED, không xoay
 
-Khác với velocity, **vị trí trong `ODOMETRY` không bị ArduPilot xoay** — nó
+Khác với velocity, **vị trí trong** `ODOMETRY` **không bị ArduPilot xoay** — nó
 được fuse thẳng vào EKF3, mà EKF3 làm việc trong hệ NED:
 
 ```cpp
@@ -279,6 +305,8 @@ def enu_to_ned_m(east_m, north_m, up_m):
 > đổi sai, vị trí EKF bị phản chiếu qua đường chéo và drone bay tới vị trí
 > đối xứng. `tools/inspect_frames.py` có gate check riêng cho việc này.
 
+
+
 ### 6.3 Quy ước velocity: body FRD
 
 Velocity thì **có** bị ArduPilot xoay:
@@ -298,6 +326,8 @@ trilateration không cho velocity estimate, nên node gửi `0` cho cả ba và
 > `EK3_SRC1_VELXY = 0` thì `useVelXYSource(EXTNAV)` là false nên velocity
 > **không** được fuse. Đừng bật nguồn velocity nếu chưa có velocity thật.
 
+
+
 ### 6.4 Covariance → measurement noise
 
 ArduPilot không có trường "accuracy" riêng; nó suy ra noise từ covariance:
@@ -308,7 +338,7 @@ posErr = cbrtf(sq(m.pose_covariance[0]) + sq(m.pose_covariance[6]) + sq(m.pose_c
 
 Chỉ ba phần tử chéo của khối position trong ma trận 6×6 được đọc:
 `[0]` = var(x), `[6]` = var(y), `[11]` = var(z). Mỗi phần tử là **variance**
-(\(\sigma^2\)), không phải stddev.
+(\sigma^2), không phải stddev.
 
 Do công thức lại **bình phương** giá trị đã là variance, `posErr` thu được
 nhỏ hơn stddev thật. Vì vậy `VISO_POS_M_NSE` là **sàn** quan trọng:
@@ -352,7 +382,11 @@ MAVLink v2:
 > hoặc khi `SYSID_ENFORCE = 0`. `sysid = 255` khớp `SYSID_MYGCS` nên
 > message được nhận kể cả khi `SYSID_ENFORCE` bật.
 
+
+
 ## 7. Tầng 5 — ArduPilot SITL
+
+
 
 ### 7.1 Port serial
 
@@ -367,23 +401,25 @@ lỡ message đầu tiên.
 
 ### 7.2 Tham số liên quan
 
-| Tham số | Giá trị | Ý nghĩa |
-| --- | --- | --- |
-| `BCN_TYPE` | `0` | backend beacon **tắt** (thay bằng VISO) |
-| `VISO_TYPE` | `1` | `AP_VisualOdom_MAV` — backend MAVLink (nhận ODOMETRY) |
-| `VISO_DELAY_MS` | `50` | độ trễ transport, ms |
-| `VISO_POS_M_NSE` | `0.05` | sàn measurement noise vị trí, m |
-| `VISO_QUAL_MIN` | `0` | chấp nhận cả quality=0 (unknown) |
-| `SERIAL1_PROTOCOL` | `1` | `SerialProtocol_MAVLink` |
-| `SERIAL1_BAUD` | `115` | baud rate |
-| `BRD_SER1_RTSCTS` | `0` | không dùng flow control phần cứng |
-| `EK3_SRC1_POSXY` | `6` | nguồn vị trí XY = **EXTNAV** |
-| `EK3_SRC1_POSZ` | `1` | nguồn độ cao = BARO |
-| `EK3_SRC1_VELXY` / `VELZ` | `0` / `0` | không có velocity estimate |
-| `EK3_SRC1_YAW` | `1` | yaw từ compass |
-| `AHRS_EKF_TYPE` | `3` | dùng EKF3 |
-| `GPS1_TYPE` / `GPS2_TYPE` | `0` | indoor, tắt GPS |
-| `ARMING_CHECK` | `0` | tắt toàn bộ pre-arm check |
+
+| Tham số                   | Giá trị   | Ý nghĩa                                               |
+| ------------------------- | --------- | ----------------------------------------------------- |
+| `BCN_TYPE`                | `0`       | backend beacon **tắt** (thay bằng VISO)               |
+| `VISO_TYPE`               | `1`       | `AP_VisualOdom_MAV` — backend MAVLink (nhận ODOMETRY) |
+| `VISO_DELAY_MS`           | `50`      | độ trễ transport, ms                                  |
+| `VISO_POS_M_NSE`          | `0.05`    | sàn measurement noise vị trí, m                       |
+| `VISO_QUAL_MIN`           | `0`       | chấp nhận cả quality=0 (unknown)                      |
+| `SERIAL1_PROTOCOL`        | `1`       | `SerialProtocol_MAVLink`                              |
+| `SERIAL1_BAUD`            | `115`     | baud rate                                             |
+| `BRD_SER1_RTSCTS`         | `0`       | không dùng flow control phần cứng                     |
+| `EK3_SRC1_POSXY`          | `6`       | nguồn vị trí XY = **EXTNAV**                          |
+| `EK3_SRC1_POSZ`           | `1`       | nguồn độ cao = BARO                                   |
+| `EK3_SRC1_VELXY` / `VELZ` | `0` / `0` | không có velocity estimate                            |
+| `EK3_SRC1_YAW`            | `1`       | yaw từ compass                                        |
+| `AHRS_EKF_TYPE`           | `3`       | dùng EKF3                                             |
+| `GPS1_TYPE` / `GPS2_TYPE` | `0`       | indoor, tắt GPS                                       |
+| `ARMING_CHECK`            | `0`       | tắt toàn bộ pre-arm check                             |
+
 
 > `VISO_TYPE` **phải** là `1`. `EK3_SRC1_POSXY = EXTNAV` khi
 > `VISO_TYPE = 0` sẽ không có backend nào cấp dữ liệu, EKF không bao giờ
@@ -391,6 +427,8 @@ lỡ message đầu tiên.
 
 > `EK3_SRC1_POSZ` **phải** là `BARO`. Nếu để `EXTNAV` thì EKF lấy độ cao từ
 > ODOMETRY, mà node gửi `z` cố định bằng 0 — drone sẽ không giữ được cao độ.
+
+
 
 ### 7.3 Điều ArduPilot làm với message nhận được
 
@@ -415,23 +453,27 @@ EKF3 IMU0 is using external nav data
 EKF3 IMU0 initial pos NED = 3.0,4.0,-0.0 (m)
 ```
 
+
+
 ## 8. Định nghĩa topic và frame
 
-| Topic | Kiểu | Publisher | QoS |
-| --- | --- | --- | --- |
-| `/uwb/ranging/tag` | `gz::msgs::Pose` | `UwbSystem` (gz-transport) | gz mặc định |
-| `/uwb/tag_pose/tag` | `gz::msgs::Pose` | `UwbSystem` | gz mặc định |
-| `/uwb/anchors/tag` | `gz::msgs::Marker` | `UwbSystem` | gz mặc định |
-| `/uwb/ranging_ros` | `geometry_msgs/Pose` | `uwb_gz_to_ros_bridge` | best-effort, volatile |
-| `/uwb/tag_pose_ros` | `geometry_msgs/Pose` | `uwb_gz_to_ros_bridge` | best-effort, volatile |
-| `/uwb/pose` | `geometry_msgs/PoseStamped` | `odometry_node` | best-effort, volatile |
+
+| Topic               | Kiểu                        | Publisher                  | QoS                   |
+| ------------------- | --------------------------- | -------------------------- | --------------------- |
+| `/uwb/ranging/tag`  | `gz::msgs::Pose`            | `UwbSystem` (gz-transport) | gz mặc định           |
+| `/uwb/tag_pose/tag` | `gz::msgs::Pose`            | `UwbSystem`                | gz mặc định           |
+| `/uwb/anchors/tag`  | `gz::msgs::Marker`          | `UwbSystem`                | gz mặc định           |
+| `/uwb/ranging_ros`  | `geometry_msgs/Pose`        | `uwb_gz_to_ros_bridge`     | best-effort, volatile |
+| `/uwb/tag_pose_ros` | `geometry_msgs/Pose`        | `uwb_gz_to_ros_bridge`     | best-effort, volatile |
+| `/uwb/pose`         | `geometry_msgs/PoseStamped` | `odometry_node`            | best-effort, volatile |
+
 
 Frame bị ảnh hưởng bởi hệ UWB:
 
 - `world` — frame world của Gazebo, dùng cho `/uwb/pose` và cho vị trí anchor
-  trong trilateration.
+trong trilateration.
 - `odom` — frame odom của Gazebo (odometry publisher, `odom_frame=odom`,
-  `robot_base_frame=base_link`), được RViz dùng làm fixed frame.
+`robot_base_frame=base_link`), được RViz dùng làm fixed frame.
 - `base_link` — frame của link gốc xe, là vị trí gắn tag UWB.
 
 > Lưu ý: frame `odom` do Gazebo sinh ra **không** phải frame `odom` của EKF3
@@ -439,42 +481,52 @@ Frame bị ảnh hưởng bởi hệ UWB:
 > external nav đã fuse, vị trí EKF3 (qua MAVROS) và vị trí `/uwb/pose` mới
 > xấp xỉ trùng nhau.
 
+
+
 ## 9. Chuỗi khởi động
 
 Thứ tự khởi động trong `x500_uwb_runway.launch.py` có chủ đích:
 
-| Mốc thời gian | Hành động | Lý do |
-| --- | --- | --- |
-| t = 0 | Gazebo server + GUI, RViz | world và anchor phải có trước |
-| t = 0 | `uwb_gz_to_ros_bridge` | subscribe gz topic |
-| t ≈ 0 | SITL (`arducopter`) với `--serial1 tcp:5761:wait` | block chờ MAVLink client |
-| t = 8 s | `sitl_extnav_monitor` (mặc định **tắt**) | chỉ dùng để set param runtime |
-| t = 14 s | `odometry_node` | SITL đã bind port 5761 |
+
+| Mốc thời gian | Hành động                                         | Lý do                         |
+| ------------- | ------------------------------------------------- | ----------------------------- |
+| t = 0         | Gazebo server + GUI, RViz                         | world và anchor phải có trước |
+| t = 0         | `uwb_gz_to_ros_bridge`                            | subscribe gz topic            |
+| t ≈ 0         | SITL (`arducopter`) với `--serial1 tcp:5761:wait` | block chờ MAVLink client      |
+| t = 8 s       | `sitl_extnav_monitor` (mặc định **tắt**)          | chỉ dùng để set param runtime |
+| t = 14 s      | `odometry_node`                                   | SITL đã bind port 5761        |
+
 
 Ngoài ra launch file kiểm tra trước khi start:
 
 - **Port 5760 và 5761 phải free** — nếu SITL instance cũ còn chạy, SITL mới
-  exit với `bind failed on port 5760` và MAVProxy retry vô hạn, trông như lỗi
-  telemetry thay vì process cũ.
-- **`world_name` phải khớp** `<world name="...">` trong SDF — bridge Gazebo
-  subscribe `/world/<world_name>/model/<robot_name>/joint_state`. Nếu sai,
-  joint state không tới ⇒ RSP không xuất transform `base_link → rotor_0` ⇒
-  RViz báo `No transform from [rotor_0] to [odom]`.
+exit với `bind failed on port 5760` và MAVProxy retry vô hạn, trông như lỗi
+telemetry thay vì process cũ.
+- `world_name` **phải khớp** `<world name="...">` trong SDF — bridge Gazebo
+subscribe `/world/<world_name>/model/<robot_name>/joint_state`. Nếu sai,
+joint state không tới ⇒ RSP không xuất transform `base_link → rotor_0` ⇒
+RViz báo `No transform from [rotor_0] to [odom]`.
+
+
 
 ## 10. Luồng lỗi và triệu chứng
 
-| Triệu chứng | Nguyên nhân | Cách xử lý |
-| --- | --- | --- |
-| RViz: `No transform from [rotor_0] to [odom]` | `world_name` không khớp SDF ⇒ không có joint state | truyền `world_name` đúng, ví dụ `uwb_runway` |
-| `odometry_node` chết với `PackageNotFoundError` | build `uwb_pozyx_bridge` lỗi, mất package metadata | `colcon build --packages-up-to uwb_pozyx_bridge` |
-| MAVProxy lặp `link 1 down` | SITL cũ còn chiếm port 5760 | `pkill -f arducopter; pkill -f mavproxy.py` |
-| EKF không báo `is using external nav data` | `VISO_TYPE` = 0, hoặc node chưa kết nối port 5761 | kiểm tra `VISO_TYPE 1` và log `messages_sent` của node |
-| EKF fuse nhưng vị trí lệch gương (đối xứng qua đường chéo) | ENU → NED bị hoán đổi sai trục | dùng `enu_to_ned_m()`: `x` = North, `y` = East |
-| EKF không lấy độ cao | `EK3_SRC1_POSZ` bị đặt sai | đặt `EK3_SRC1_POSZ 1` (BARO) |
-| EKF bám quá chặt / innovation test fail | `VISO_POS_M_NSE` quá nhỏ | tăng `VISO_POS_M_NSE` (ví dụ `0.05` → `0.2`) |
-| Drone bị "lật" khi bay vòng | position setpoint lệch vì EKF lệch frame | kiểm tra `/uwb/pose` so với `LOCAL_POSITION_NED` |
-| LOS flag bị mất | encode LOS thành quaternion roll | ghi thẳng `orientation.x` |
-| `Arm: Need Position Estimate` | EKF mất external nav sau khi SITL restart | restart lại toàn bộ stack, chờ `is using external nav data` |
+
+| Triệu chứng                                                | Nguyên nhân                                        | Cách xử lý                                                  |
+| ---------------------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------- |
+| RViz: `No transform from [rotor_0] to [odom]`              | `world_name` không khớp SDF ⇒ không có joint state | truyền `world_name` đúng, ví dụ `uwb_runway`                |
+| `odometry_node` chết với `PackageNotFoundError`            | build `uwb_pozyx_bridge` lỗi, mất package metadata | `colcon build --packages-up-to uwb_pozyx_bridge`            |
+| MAVProxy lặp `link 1 down`                                 | SITL cũ còn chiếm port 5760                        | `pkill -f arducopter; pkill -f mavproxy.py`                 |
+| EKF không báo `is using external nav data`                 | `VISO_TYPE` = 0, hoặc node chưa kết nối port 5761  | kiểm tra `VISO_TYPE 1` và log `messages_sent` của node      |
+| EKF fuse nhưng vị trí lệch gương (đối xứng qua đường chéo) | ENU → NED bị hoán đổi sai trục                     | dùng `enu_to_ned_m()`: `x` = North, `y` = East              |
+| EKF không lấy độ cao                                       | `EK3_SRC1_POSZ` bị đặt sai                         | đặt `EK3_SRC1_POSZ 1` (BARO)                                |
+| EKF bám quá chặt / innovation test fail                    | `VISO_POS_M_NSE` quá nhỏ                           | tăng `VISO_POS_M_NSE` (ví dụ `0.05` → `0.2`)                |
+| Drone bị "lật" khi bay vòng                                | position setpoint lệch vì EKF lệch frame           | kiểm tra `/uwb/pose` so với `LOCAL_POSITION_NED`            |
+| LOS flag bị mất                                            | encode LOS thành quaternion roll                   | ghi thẳng `orientation.x`                                   |
+| `Arm: Need Position Estimate`                              | EKF mất external nav sau khi SITL restart          | restart lại toàn bộ stack, chờ `is using external nav data` |
+
+
+
 
 ## 11. Diễn giải protocol trong Python
 
@@ -502,17 +554,20 @@ telemetry ngược lại trên cùng port, nếu không đọc thì buffer nhậ
 
 ## 12. Công cụ kiểm tra
 
-| Tool | Việc |
-| --- | --- |
-| `tools/inspect_frames.py` | gate check frame: in message ODOMETRY sẽ gửi, kiểm tra frame id và khớp NED |
-| `tools/sitl_extnav_monitor.py` | đọc/ghi param VISO + EK3, theo dõi `EKF_STATUS_REPORT` |
-| `tools/check_extnav_e2e.py` | gửi ODOMETRY cố định, xác nhận EKF báo `is using external nav data` |
-| `tools/check_extnav_tracking.py` | gửi ramp vị trí, xác nhận EKF bám theo |
-| `tools/compare_positions.py` | so sánh vị trí Gazebo / trilateration / EKF |
-| `tools/verify_fdm_coupling.py` | kiểm tra SITL thực sự điều khiển mô phỏng Gazebo |
-| `tools/run_pipeline_verify.sh` | chạy cả ba gate trên trong một lần |
+
+| Tool                             | Việc                                                                        |
+| -------------------------------- | --------------------------------------------------------------------------- |
+| `tools/inspect_frames.py`        | gate check frame: in message ODOMETRY sẽ gửi, kiểm tra frame id và khớp NED |
+| `tools/sitl_extnav_monitor.py`   | đọc/ghi param VISO + EK3, theo dõi `EKF_STATUS_REPORT`                      |
+| `tools/check_extnav_e2e.py`      | gửi ODOMETRY cố định, xác nhận EKF báo `is using external nav data`         |
+| `tools/check_extnav_tracking.py` | gửi ramp vị trí, xác nhận EKF bám theo                                      |
+| `tools/compare_positions.py`     | so sánh vị trí Gazebo / trilateration / EKF                                 |
+| `tools/verify_fdm_coupling.py`   | kiểm tra SITL thực sự điều khiển mô phỏng Gazebo                            |
+| `tools/run_pipeline_verify.sh`   | chạy cả ba gate trên trong một lần                                          |
+
 
 ```bash
 # Kiểm tra nhanh không cần Gazebo
 python3 src/uwb_pozyx_bridge/tools/check_extnav_e2e.py
 ```
+
