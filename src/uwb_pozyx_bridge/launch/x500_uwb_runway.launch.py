@@ -4,14 +4,23 @@ This builds on ``ardupilot_gz_bringup/x500_runway.launch.py`` rather than
 reimplementing it, so the Gazebo GUI, RViz, the Gazebo/ROS bridges, MAVROS
 and MAVProxy all keep working.  On top of that it adds:
 
-* the UWB world with the four anchors (``uwb_runway.sdf``)
+* the UWB world with the four anchors (``uwb_runway.sdf``), rendered for the
+  layout that is requested on the command line
 * the gz -> ROS 2 bridge that carries the ranging data
 * the odometry bridge node that turns the ranges into MAVLink ODOMETRY
   messages for ArduPilot's external navigation (EXTNAV) source
 * the MAVLink monitor that applies the parameters
 
-The vehicle spawns at (5, 5, 0.1), which is the UWB origin, so the position
-that is sent to ArduPilot is relative to the spawn point.
+The vehicle spawns at a random point inside the anchor rectangle, so the
+ranging geometry is not the degenerate "directly under an anchor" case on
+every run.  The spawn point is expressed in the Gazebo world frame (ENU);
+the anchor frame of the solver is the same rectangle with ``x = North`` and
+``y = East``.
+
+The layout is a rectangle, not necessarily a square: ``layout_size_x_m`` is
+the length of the ``a0 -> a1`` side and ``layout_size_y_m`` the length of
+the ``a0 -> a3`` side.  The defaults match the ESP32 tag's
+``CFG_DEFAULT_LAYOUT_SIZE_X_M`` / ``CFG_DEFAULT_LAYOUT_SIZE_Y_M``.
 
 Run with::
 
@@ -21,7 +30,9 @@ Mission Planner connects to the MAVProxy UDP output on port 14551.
 """
 
 import os
+import random
 import socket
+import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -38,9 +49,17 @@ from launch.substitutions import PathJoinSubstitution
 
 from launch_ros.actions import Node
 
-#: The UWB origin, which is also where the vehicle spawns.
-SPAWN_X = 5.0
-SPAWN_Y = 5.0
+from uwb_pozyx_bridge.uwb_layout import (
+    LAYOUT_SIZE_X_M,
+    LAYOUT_SIZE_Y_M,
+    AnchorLayout,
+)
+from uwb_pozyx_bridge.uwb_world import write_world
+
+#: The height of the anchor plane above the ground, in metres.
+ANCHOR_PLANE_HEIGHT_M = 2.0
+
+#: The height of the vehicle above the ground at spawn time, in metres.
 SPAWN_Z = 0.2
 
 #: The serial port SITL listens on for the MAVLink external navigation link.
@@ -59,8 +78,8 @@ ORIGIN_LONGITUDE_DEG = 149.165237
 ORIGIN_ALTITUDE_M = 584.0
 
 
-def _uwb_world_path() -> str:
-    """Full path to the UWB world."""
+def _uwb_world_template_path() -> str:
+    """Full path to the UWB world template."""
     return os.path.join(
         get_package_share_directory("uwb_gz_plugin"), "worlds", "uwb_runway.sdf"
     )
@@ -71,6 +90,66 @@ def _merged_params() -> str:
     return os.path.join(
         get_package_share_directory("uwb_pozyx_bridge"), "config", "x500_uwb.parm"
     )
+
+
+def _layout(context) -> AnchorLayout:
+    """Build the layout from the launch arguments."""
+    return AnchorLayout(
+        size_x_m=float(LaunchConfiguration("layout_size_x_m").perform(context)),
+        size_y_m=float(LaunchConfiguration("layout_size_y_m").perform(context)),
+        alpha_deg=float(LaunchConfiguration("layout_alpha_deg").perform(context)),
+        plane_height_m=ANCHOR_PLANE_HEIGHT_M,
+    )
+
+
+def _render_world(context) -> str:
+    """Render the Gazebo world for the requested layout.
+
+    The world file of the package is the template; the anchor positions are
+    substituted so that the plugin, the visible anchor models and the solver
+    all describe the same rectangle.
+
+    Returns:
+        The path of the rendered world file.
+    """
+    layout = _layout(context)
+    template_path = _uwb_world_template_path()
+    with open(template_path, "r", encoding="utf-8") as handle:
+        template = handle.read()
+
+    target = os.path.join(
+        tempfile.gettempdir(),
+        f"uwb_runway_{layout.size_x_m:.3f}x{layout.size_y_m:.3f}"
+        f"_a{layout.alpha_deg:.3f}.sdf",
+    )
+    write_world(target, template, layout)
+    return target
+
+
+def _spawn_position(context) -> tuple[float, float]:
+    """Pick the spawn point of the vehicle.
+
+    The point is drawn uniformly inside the anchor rectangle, with a
+    margin to the edges so that the ranging geometry is never degenerate.
+    With ``random_spawn`` disabled the centre of the rectangle is used,
+    which is the reproducible default.
+
+    Returns:
+        The ``(east_m, north_m)`` spawn position in the Gazebo world frame.
+    """
+    layout = _layout(context)
+
+    if LaunchConfiguration("random_spawn").perform(context).lower() not in (
+        "true",
+        "1",
+        "yes",
+    ):
+        east, north = layout.centre_enu()
+        return (east, north)
+
+    seed = int(LaunchConfiguration("spawn_seed").perform(context) or 0)
+    rng = random.Random(seed if seed else None)
+    return layout.random_spawn_enu(rng)
 
 
 def _port_is_free(port: int) -> bool:
@@ -106,42 +185,52 @@ def _check_ports(context):
     return []
 
 
-def generate_launch_description() -> LaunchDescription:
-    """Build the launch description."""
+def _base_stack(context):
+    """Include the base stack, with the spawn point resolved.
+
+    The spawn point cannot be given as a launch argument of this file
+    directly, because the base launch file takes it as a string and the
+    value has to be computed here (a random point inside the rectangle).
+    """
+    spawn_east, spawn_north = _spawn_position(context)
+    world_path = _render_world(context)
     pkg_bringup = get_package_share_directory("ardupilot_gz_bringup")
 
-    # The base stack: Gazebo server + GUI, the x500 with SITL, RViz and the
-    # Gazebo/ROS bridges.  Everything the plain runway launch does is kept.
-    base = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution(
-                [pkg_bringup, "launch", "x500_runway.launch.py"]
-            )
-        ),
-        launch_arguments={
-            "world": _uwb_world_path(),
-            "x": str(SPAWN_X),
-            "y": str(SPAWN_Y),
-            "z": str(SPAWN_Z),
-            # The merged parameter file replaces the x500 defaults, because
-            # it already contains the x500 tuning plus the external
-            # navigation settings.
-            "defaults": _merged_params(),
-            # MAVROS is off by default: it is only needed once the vehicle
-            # is actually controlled over ROS.
-            "use_mavros": LaunchConfiguration("use_mavros"),
-            # The Gazebo world of this launch file is the UWB world, so the
-            # bridge has to subscribe to /world/uwb_runway/... and not to
-            # /world/runway/...  Without this the joint states never arrive
-            # and RViz reports "No transform from [rotor_0] to [odom]".
-            "world_name": WORLD_NAME,
-            # SERIAL1 carries the MAVLink external navigation link.  The
-            # ":wait" suffix makes SITL block until the odometry node
-            # connects, so no fix is missed during start-up.
-            "serial1": f"tcp:{NAV_SERIAL_PORT}:wait",
-        }.items(),
-    )
+    return [
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution(
+                    [pkg_bringup, "launch", "x500_runway.launch.py"]
+                )
+            ),
+            launch_arguments={
+                "world": world_path,
+                "x": f"{spawn_east:.3f}",
+                "y": f"{spawn_north:.3f}",
+                "z": f"{SPAWN_Z:.3f}",
+                # The merged parameter file replaces the x500 defaults, because
+                # it already contains the x500 tuning plus the external
+                # navigation settings.
+                "defaults": _merged_params(),
+                # MAVROS is off by default: it is only needed once the vehicle
+                # is actually controlled over ROS.
+                "use_mavros": LaunchConfiguration("use_mavros"),
+                # The Gazebo world of this launch file is the UWB world, so the
+                # bridge has to subscribe to /world/uwb_runway/... and not to
+                # /world/runway/...  Without this the joint states never arrive
+                # and RViz reports "No transform from [rotor_0] to [odom]".
+                "world_name": WORLD_NAME,
+                # SERIAL1 carries the MAVLink external navigation link.  The
+                # ":wait" suffix makes SITL block until the odometry node
+                # connects, so no fix is missed during start-up.
+                "serial1": f"tcp:{NAV_SERIAL_PORT}:wait",
+            }.items(),
+        )
+    ]
 
+
+def generate_launch_description() -> LaunchDescription:
+    """Build the launch description."""
     # The gz -> ROS 2 bridge that carries the ranging data.
     gz_bridge = Node(
         package="uwb_gz_plugin",
@@ -162,6 +251,14 @@ def generate_launch_description() -> LaunchDescription:
             {"serial_host": "127.0.0.1"},
             {"serial_port": NAV_SERIAL_PORT},
             {"send_rate": 20.0},
+            # The layout of the anchors.  ``layout_alpha_deg`` is the bearing
+            # of the direction ``a0 -> a1`` measured from North; it is the
+            # same quantity the ESP32 tag calls ``config_yaw_offset_deg``.
+            # The layout is a rectangle: the two sides are independent.
+            {"layout_size_x_m": LaunchConfiguration("layout_size_x_m")},
+            {"layout_size_y_m": LaunchConfiguration("layout_size_y_m")},
+            {"layout_alpha_deg": LaunchConfiguration("layout_alpha_deg")},
+            {"anchor_plane_height_m": ANCHOR_PLANE_HEIGHT_M},
             # Standard deviation of the position estimate, in metres.  It
             # is squared to obtain the covariance entries of the ODOMETRY
             # message, from which ArduPilot derives the EKF measurement
@@ -217,10 +314,50 @@ def generate_launch_description() -> LaunchDescription:
                     "How long the MAVLink monitor stays connected, in seconds."
                 ),
             ),
+            DeclareLaunchArgument(
+                "layout_size_x_m",
+                default_value=f"{LAYOUT_SIZE_X_M}",
+                description=(
+                    "Length of the a0 -> a1 side of the anchor rectangle, in "
+                    "metres.  Matches CFG_DEFAULT_LAYOUT_SIZE_X_M on the ESP32."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "layout_size_y_m",
+                default_value=f"{LAYOUT_SIZE_Y_M}",
+                description=(
+                    "Length of the a0 -> a3 side of the anchor rectangle, in "
+                    "metres.  Matches CFG_DEFAULT_LAYOUT_SIZE_Y_M on the ESP32."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "layout_alpha_deg",
+                default_value="0.0",
+                description=(
+                    "Bearing of the direction a0 -> a1, measured from North "
+                    "and positive towards the East, in degrees."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "random_spawn",
+                default_value="true",
+                description=(
+                    "Spawn the vehicle at a random point inside the anchor "
+                    "rectangle.  Set to false to spawn it at the centre."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "spawn_seed",
+                default_value="0",
+                description=(
+                    "Seed of the random spawn.  Zero means a fresh random "
+                    "point on every run."
+                ),
+            ),
             # Fail early with a clear message when a port of the stack is
             # still taken by a previous run.
             OpaqueFunction(function=_check_ports),
-            base,
+            OpaqueFunction(function=_base_stack),
             gz_bridge,
             # The monitor connects to SITL's MAVLink port, which is only
             # bound once SITL has finished starting up.

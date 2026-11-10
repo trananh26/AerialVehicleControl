@@ -11,14 +11,16 @@ makes it the direct replacement for the old Pozyx ``AP_Beacon`` backend.
 The pipeline is:
 
 1. Subscribe to the ranging messages published by the ``uwb_gz_plugin``.
-2. Solve for the tag position by weighted least squares.
-3. Convert the position from the Gazebo ENU frame to the NED frame that
-   ArduPilot expects and send it as an ``ODOMETRY`` message.
+2. Solve for the tag position by weighted least squares, in the **anchor
+   frame** (the ideal square of the layout, see
+   :mod:`uwb_pozyx_bridge.uwb_layout`).
+3. Rotate the solution into NED by the layout angle ``alpha`` and send it as
+   an ``ODOMETRY`` message.
 
 Only the position is transmitted.  The velocity fields of an ``ODOMETRY``
 message are interpreted by ArduPilot in the body FRD frame, and the UWB
-ranging data does not provide a velocity estimate, so they are left at zero
-and the EKF velocity source stays disabled (``EK3_SRC1_VELXY = 0``).
+ranging data does not provide a velocity estimate, so they are sent as
+``NaN`` and the EKF velocity source stays disabled (``EK3_SRC1_VELXY = 0``).
 
 .. warning::
    The position of an ``ODOMETRY`` message is **not** transformed by
@@ -44,11 +46,11 @@ from .mavlink_odometry import (
     build_do_set_home_message,
     build_odometry_message,
     build_set_gps_global_origin_message,
-    enu_to_ned_m,
 )
 from .mavlink_sender import MavlinkSender
 from .trilateration import Anchor, RangeMeasurement, solve_position
-from .uwb_decoding import DEFAULT_ANCHOR_OFFSETS_MM, decode_ranging_pose
+from .uwb_decoding import decode_ranging_pose
+from .uwb_layout import AnchorLayout, default_layout
 
 #: A position change larger than this between two fixes is treated as a
 #: discontinuity and bumps the MAVLink reset counter.  The default is well
@@ -97,10 +99,19 @@ class OdometryBridgeNode(Node):
         self.declare_parameter("serial_port", 5761)
 
         self.declare_parameter("anchor_count", 4)
-        self.declare_parameter(
-            "anchor_offsets_mm",
-            [v for triple in DEFAULT_ANCHOR_OFFSETS_MM for v in triple],
-        )
+
+        # The layout of the anchors.  ``alpha_deg`` is the bearing of the
+        # direction ``a0 -> a1``, measured from North; it is the same
+        # quantity the ESP32 tag calls ``config_yaw_offset_deg``.
+        #
+        # The layout is a rectangle: ``layout_size_x_m`` is the length of
+        # the ``a0 -> a1`` side and ``layout_size_y_m`` the length of the
+        # ``a0 -> a3`` side.  They are usually different, because the
+        # anchors are mounted wherever there is room for them.
+        self.declare_parameter("layout_size_x_m", default_layout().size_x_m)
+        self.declare_parameter("layout_size_y_m", default_layout().size_y_m)
+        self.declare_parameter("layout_alpha_deg", 0.0)
+        self.declare_parameter("anchor_plane_height_m", default_layout().plane_height_m)
 
         # Noise model, in metres.
         self.declare_parameter("los_std", 0.10)
@@ -110,9 +121,20 @@ class OdometryBridgeNode(Node):
         # Solver.
         self.declare_parameter("min_anchors", 3)
         self.declare_parameter("max_range", 50.0)
-        self.declare_parameter("assume_constant_z", True)
+        # With coplanar anchors the vertical component is ambiguous: the
+        # ranges cannot tell which side of the anchor plane the tag is on.
+        # The 3D solve resolves this by picking the branch that is closest
+        # to the previous solution, which keeps the estimate continuous.
+        # The legacy 2D mode (fixed altitude) is still available for
+        # comparison, but it biases the horizontal solution by up to 0.2 m.
+        self.declare_parameter("assume_constant_z", False)
         self.declare_parameter("tag_altitude_mm", 0.0)
-        self.declare_parameter("initial_guess", [0.0, 0.0, 0.0])
+        # The seed of the solver.  When left empty it is derived from the
+        # layout: the centre of the rectangle, one metre below the anchor
+        # plane.  The vertical component selects the branch of the mirror
+        # ambiguity, so it has to be on the side of the anchor plane the
+        # tag is expected to be on.
+        self.declare_parameter("initial_guess", [])
 
         # Standard deviation of the position estimate, in metres.  ArduPilot
         # derives the measurement noise from the covariance matrix of the
@@ -148,7 +170,16 @@ class OdometryBridgeNode(Node):
 
         # ----- members -----
         self._lock = threading.Lock()
+        self._layout = AnchorLayout(
+            size_x_m=float(self.get_parameter("layout_size_x_m").value),
+            size_y_m=float(self.get_parameter("layout_size_y_m").value),
+            alpha_deg=float(self.get_parameter("layout_alpha_deg").value),
+            plane_height_m=float(
+                self.get_parameter("anchor_plane_height_m").value
+            ),
+        )
         self._anchors = self._load_anchors()
+        self._initial_guess = self._resolve_initial_guess()
         self._ranges: dict[int, RangeMeasurement] = {}
         self._last_solution = None
         self._num_solutions = 0
@@ -202,6 +233,8 @@ class OdometryBridgeNode(Node):
 
         self.get_logger().info(
             f"odometry_node ready: anchors={len(self._anchors)} "
+            f"layout={self._layout.size_x_m:.1f}x{self._layout.size_y_m:.1f}m "
+            f"alpha={self._layout.alpha_deg:.1f}deg "
             f"input={self.get_parameter('input_topic').value} "
             f"serial={self.get_parameter('serial_host').value}:"
             f"{self.get_parameter('serial_port').value}"
@@ -210,29 +243,39 @@ class OdometryBridgeNode(Node):
     # ------------------------------------------------------------ helpers
 
     def _load_anchors(self) -> list[Anchor]:
-        """Build the anchor list from the ``anchor_offsets_mm`` parameter."""
-        flat = list(self.get_parameter("anchor_offsets_mm").value)
-        count = int(self.get_parameter("anchor_count").value)
+        """Build the anchor list from the layout.
 
-        if len(flat) < 3 * count:
-            self.get_logger().warn(
-                "anchor_offsets_mm is shorter than anchor_count*3; "
-                "falling back to the default 10x10 m layout."
-            )
-            flat = [v for triple in DEFAULT_ANCHOR_OFFSETS_MM for v in triple]
-            count = 4
-
+        The solver works in the **anchor frame**: the ideal rectangle, with
+        ``a0`` at the origin.  The physical layout is the same rectangle
+        rotated by ``alpha``, and the rotation is applied to the solver
+        *result* instead — see :meth:`_send_cycle`.  This keeps the
+        ranging geometry independent of the mounting angle and makes the
+        ESP32 tag and this node behave identically.
+        """
         anchors: list[Anchor] = []
-        for i in range(count):
-            x_mm, y_mm, z_mm = flat[3 * i], flat[3 * i + 1], flat[3 * i + 2]
-            anchors.append(
-                Anchor(
-                    id=i,
-                    # Convert to metres for the trilateration solver.
-                    position=(x_mm / 1000.0, y_mm / 1000.0, z_mm / 1000.0),
-                )
-            )
+        for i, (x_m, y_m, z_m) in enumerate(
+            self._layout.anchor_frame_positions()
+        ):
+            anchors.append(Anchor(id=i, position=(x_m, y_m, z_m)))
         return anchors
+
+    def _resolve_initial_guess(self) -> list[float]:
+        """The seed of the solver.
+
+        The parameter overrides the default; when it is empty the seed is
+        derived from the layout: the centre of the rectangle, one metre
+        below the anchor plane.  The vertical component picks the branch of
+        the mirror ambiguity, so it has to be on the side of the anchor
+        plane the tag is expected to be on.
+        """
+        configured = list(self.get_parameter("initial_guess").value)
+        if len(configured) >= 3:
+            return [float(v) for v in configured[:3]]
+        return [
+            self._layout.size_x_m / 2.0,
+            self._layout.size_y_m / 2.0,
+            1.0,
+        ]
 
     # ----------------------------------------------------------- callback
 
@@ -274,7 +317,12 @@ class OdometryBridgeNode(Node):
             nlos_hard_std=float(self.get_parameter("nlos_hard_std").value),
             min_anchors=int(self.get_parameter("min_anchors").value),
             max_range=float(self.get_parameter("max_range").value),
-            initial_guess=list(self.get_parameter("initial_guess").value),
+            initial_guess=self._initial_guess,
+            previous_position=(
+                self._last_solution.position
+                if self._last_solution is not None
+                else None
+            ),
             assume_constant_z=bool(
                 self.get_parameter("assume_constant_z").value
             ),
@@ -287,17 +335,29 @@ class OdometryBridgeNode(Node):
         self._num_solutions += 1
         self._publish_pose(result)
 
-        # The trilateration result is in the Gazebo ENU frame; ArduPilot
-        # fuses the ODOMETRY position as-is in NED, so the horizontal axes
-        # are swapped and the vertical axis is flipped here.
-        z_m = (
-            float(self.get_parameter("tag_altitude_mm").value) / 1000.0
-            if bool(self.get_parameter("assume_constant_z").value)
-            else result.position[2]
-        )
-        north_m, east_m, down_m = enu_to_ned_m(
-            result.position[0], result.position[1], z_m
-        )
+        # The trilateration result is in the anchor frame.  It is converted
+        # into the NED frame that the EKF works in: the horizontal axes are
+        # rotated by the layout angle and offset by the position of ``a0``,
+        # and the vertical axis is converted from "depth below the anchor
+        # plane" into "depth below the EKF origin".
+        #
+        # ArduPilot fuses the ODOMETRY position as-is in NED, so the result
+        # of the conversion is what goes on the wire.
+        if bool(self.get_parameter("assume_constant_z").value):
+            # Legacy 2D mode: the altitude is held at a fixed value.
+            down_m = (
+                float(self.get_parameter("tag_altitude_mm").value) / 1000.0
+                - self._layout.plane_height_m
+            )
+            north_m, east_m = self._layout.to_ned(
+                result.position[0], result.position[1]
+            )
+        else:
+            north_m, east_m, down_m = self._layout.to_ned_3d(
+                result.position[0],
+                result.position[1],
+                result.position[2],
+            )
 
         self._detect_reset(north_m, east_m, down_m)
 
@@ -510,10 +570,14 @@ class OdometryBridgeNode(Node):
     # -------------------------------------------------------------- output
 
     def _publish_pose(self, result) -> None:
-        """Publish the trilateration result for debugging."""
+        """Publish the trilateration result for debugging.
+
+        The pose is published in the **anchor frame**, because that is the
+        frame the solver works in.
+        """
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "world"
+        msg.header.frame_id = "uwb_anchor_frame"
         msg.pose.position.x = result.position[0]
         msg.pose.position.y = result.position[1]
         msg.pose.position.z = result.position[2]

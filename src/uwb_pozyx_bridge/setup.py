@@ -29,6 +29,7 @@ setup(
                 "tools/inspect_frames.py",
                 "tools/fake_ranging_source.py",
                 "tools/verify_fdm_coupling.py",
+                "tools/compare_odometry_frames.py",
                 "tools/cleanup_stack.sh",
             ],
         ),

@@ -12,12 +12,14 @@ The frame conventions asserted here mirror ArduPilot's own source:
 * The measurement noise is derived from the covariance matrix.
 """
 
+import math
+
 import pytest
 
 from uwb_pozyx_bridge.mavlink_odometry import (
     MAV_CMD_DO_SET_HOME,
     MAV_CMD_REQUEST_MESSAGE,
-    MAV_ESTIMATOR_TYPE_VIO,
+    MAV_ESTIMATOR_TYPE_NAIVE,
     MAV_FRAME_BODY_FRD,
     MAV_FRAME_LOCAL_FRD,
     ODOMETRY_MSG_ID,
@@ -54,10 +56,16 @@ def test_message_id_is_odometry():
     assert ODOMETRY_MSG_ID == 331
 
 
-def test_estimator_type_is_vio():
+def test_estimator_type_is_naive():
+    """A trilateration solver is a naive estimator.
+
+    MAVLink 2.x has no ``MAV_ESTIMATOR_TYPE_UWB``; the official enum is
+    ``UNKNOWN = 0``, ``NAIVE = 1``, ``VISION = 2``, ``VIO = 3``, ...
+    """
     msg = build_odometry_message(1.0, 2.0, -0.5, 1_000_000)
 
-    assert msg.estimator_type == MAV_ESTIMATOR_TYPE_VIO
+    assert msg.estimator_type == MAV_ESTIMATOR_TYPE_NAIVE
+    assert MAV_ESTIMATOR_TYPE_NAIVE == 1
 
 
 # ------------------------------------------------------- frame conversion
@@ -182,22 +190,30 @@ def test_position_error_is_bounded_by_the_noise_floor():
 # ------------------------------------------------------------- velocities
 
 
-def test_velocities_default_to_zero():
-    """The node sends position only, so no velocity is fused."""
+def test_velocities_default_to_nan():
+    """The node sends position only, so there is no velocity estimate.
+
+    ``NaN`` is the MAVLink spelling of "unknown"; a zero would be a claim
+    that the vehicle is standing still.
+    """
     msg = build_odometry_message(1.0, 2.0, -0.5, 1_000_000)
 
-    assert msg.vx == 0.0
-    assert msg.vy == 0.0
-    assert msg.vz == 0.0
+    assert math.isnan(msg.vx)
+    assert math.isnan(msg.vy)
+    assert math.isnan(msg.vz)
     assert msg.rollspeed == 0.0
     assert msg.pitchspeed == 0.0
     assert msg.yawspeed == 0.0
 
 
-def test_velocity_covariance_is_zero():
+def test_velocity_covariance_first_element_is_nan():
+    """The MAVLink specification asks for ``NaN`` in the first element."""
     msg = build_odometry_message(1.0, 2.0, -0.5, 1_000_000)
 
-    assert all(value == 0.0 for value in msg.velocity_covariance)
+    assert math.isnan(msg.velocity_covariance[0])
+    assert all(
+        value == 0.0 for value in msg.velocity_covariance[1:]
+    )
 
 
 # ------------------------------------------------------------- timestamps

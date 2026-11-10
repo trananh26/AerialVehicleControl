@@ -53,13 +53,27 @@
 
       <!-- Anchor positions in the Gazebo world frame, metres.
            These must match the <include> poses below.  The four anchors sit
-           on the corners of a 10 m x 10 m square at z = 2.0 m; the vehicle
-           spawns at the centre, (5, 5, 0.1), which is the beacon origin.
+           on the corners of a rectangle at z = 2.0 m.
+
+           The Gazebo world frame is ENU (x = East, y = North, z = Up),
+           while the anchor frame used by the solver is NED-ish
+           (x = North, y = East, z = Down).  With the default layout angle
+           alpha = 0 the two differ by the usual axis swap, so for the
+           default 10 m x 10 m layout:
+
+             anchor frame a0 = (N 0,  E 0)  ->  ENU (E 0,  N 0)
+             anchor frame a1 = (N 10, E 0)  ->  ENU (E 0,  N 10)
+             anchor frame a2 = (N 10, E 10) ->  ENU (E 10, N 10)
+             anchor frame a3 = (N 0,  E 10) ->  ENU (E 10, N 0)
+
+           The launch file rewrites these positions when the layout is not
+           the default one; see uwb_pozyx_bridge/uwb_world.py.
+
            Note: the plugin reads <pos> as a child element, not an attribute. -->
       <anchor name="uwb_anchor0"><pos>0 0 2.0</pos></anchor>
-      <anchor name="uwb_anchor1"><pos>10 0 2.0</pos></anchor>
+      <anchor name="uwb_anchor1"><pos>0 10 2.0</pos></anchor>
       <anchor name="uwb_anchor2"><pos>10 10 2.0</pos></anchor>
-      <anchor name="uwb_anchor3"><pos>0 10 2.0</pos></anchor>
+      <anchor name="uwb_anchor3"><pos>10 0 2.0</pos></anchor>
     </plugin>
 
     <scene>
@@ -95,7 +109,17 @@
       <pose degrees="true">-29 545 0 0 0 363</pose>
     </include>
 
-    <!-- 4 static UWB anchors in a 10x10 m square (x=0..10, y=0..10). -->
+    <!-- 4 static UWB anchors on the corners of a rectangle (10 m x 10 m by
+         default).  These are the Gazebo world (ENU) positions, and they
+         match the <anchor> elements of the UWB plugin above:
+
+           a0 = (E  0, N  0)      a1 = (E  0, N 10)
+           a3 = (E 10, N  0)      a2 = (E 10, N 10)
+
+         In the anchor frame used by the solver (x = North, y = East) this
+         is the ideal rectangle a0 = (0,0), a1 = (X,0), a2 = (X,Y),
+         a3 = (0,Y).  The launch file rewrites these poses when the layout
+         is not the default one. -->
     <include>
       <uri>model://uwb_anchor</uri>
       <name>uwb_anchor0</name>
@@ -104,7 +128,7 @@
     <include>
       <uri>model://uwb_anchor</uri>
       <name>uwb_anchor1</name>
-      <pose>10 0 2.0 0 0 0</pose>
+      <pose>0 10 2.0 0 0 0</pose>
     </include>
     <include>
       <uri>model://uwb_anchor</uri>
@@ -114,7 +138,7 @@
     <include>
       <uri>model://uwb_anchor</uri>
       <name>uwb_anchor3</name>
-      <pose>0 10 2.0 0 0 0</pose>
+      <pose>10 0 2.0 0 0 0</pose>
     </include>
 
     <!-- NOTE: the x500 model is spawned at runtime by ros_gz_sim create

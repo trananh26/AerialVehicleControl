@@ -15,13 +15,20 @@ Field                         Meaning
 
 This module is deliberately free of ROS imports so that the decoding can be
 unit tested with plain tuples.
+
+The anchor positions themselves live in :mod:`uwb_pozyx_bridge.uwb_layout`,
+which is the single source of truth for the layout.  This module only
+provides the decoder and a couple of helpers that convert between the
+world frame and the anchor frame.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from .trilateration import RangeMeasurement
+from .uwb_layout import AnchorLayout, default_layout
 
 __all__ = [
     "decode_ranging_pose",
@@ -29,19 +36,23 @@ __all__ = [
     "DEFAULT_ANCHOR_OFFSETS_MM",
 ]
 
-#: The Gazebo world places the four anchors on the corners of a 10 m x 10 m
-#: square at z = 2.0 m, and the vehicle spawns at the centre, (5, 5, 0.1).
-#: These are the anchor positions **relative to the UWB origin**, in
-#: millimetres, expressed in the Gazebo **ENU** frame (x = East,
-#: y = North).  They feed the trilateration solver, which works in the same
-#: frame; the conversion to the NED ordering that ArduPilot expects happens
-#: once, in :func:`uwb_pozyx_bridge.mavlink_odometry.enu_to_ned_m`.
-DEFAULT_ANCHOR_OFFSETS_MM = (
-    (-5000.0, -5000.0, 1900.0),
-    (5000.0, -5000.0, 1900.0),
-    (5000.0, 5000.0, 1900.0),
-    (-5000.0, 5000.0, 1900.0),
-)
+
+def _default_offsets_mm() -> tuple[tuple[float, float, float], ...]:
+    """The default anchor offsets, in millimetres, in the anchor frame."""
+    layout = default_layout()
+    return tuple(
+        tuple(component * 1000.0 for component in position)
+        for position in layout.anchor_frame_positions()
+    )
+
+
+#: The anchor positions the trilateration solver uses, in millimetres,
+#: expressed in the **anchor frame** (x towards ``a1``, y towards ``a3``,
+#: z down).  The anchor frame is the ideal square; the physical layout is
+#: the same square rotated by the layout angle ``alpha``.
+#:
+#: These are the positions relative to ``a0``, which is the UWB origin.
+DEFAULT_ANCHOR_OFFSETS_MM = _default_offsets_mm()
 
 
 def decode_ranging_pose(
@@ -104,3 +115,42 @@ def anchor_offsets_from_world(
     return [
         (x - ox, y - oy, z - oz) for x, y, z in world_positions
     ]
+
+
+def anchor_offsets_from_layout(
+    layout: AnchorLayout,
+) -> list[tuple[float, float, float]]:
+    """The anchor positions of a layout, in metres, in the anchor frame.
+
+    Args:
+        layout: The layout to describe.
+
+    Returns:
+        Four ``(x_m, y_m, z_m)`` triples.
+    """
+    return list(layout.anchor_frame_positions())
+
+
+def layout_alpha_from_offsets(
+    offsets: list[tuple[float, float, float]],
+) -> float:
+    """Recover the layout angle from anchor offsets in the anchor frame.
+
+    The angle is the bearing of the direction ``a0 -> a1``, measured from
+    North.  This is the inverse of the rotation the ESP32 tag applies in
+    ``convertLocalToNed()``.
+
+    Args:
+        offsets: The anchor positions in the anchor frame, in metres.
+
+    Returns:
+        The angle in degrees.
+    """
+    if len(offsets) < 4:
+        raise ValueError("four anchor positions are needed")
+    # a0 -> a1 is the +x direction of the anchor frame, a0 -> a3 is +y.
+    dx = offsets[1][0] - offsets[0][0]
+    dy = offsets[1][1] - offsets[0][1]
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return 0.0
+    return math.degrees(math.atan2(dy, dx))

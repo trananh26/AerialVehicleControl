@@ -15,7 +15,8 @@ ArduPilot SITL, gồm các topic, frame, đơn vị và các bước xử lý tr
 │ Gazebo — uwb_runway.sdf                                                    │
     <plugin filename="uwb_gz_plugin" name="uwb_gz_plugin::systems::UwbSystem">│
 │     update_rate = 20 Hz, tag_model_name = x500, tag_link = base_link      │
-│     anchors (ENU, m): (0,0,2) (10,0,2) (10,10,2) (0,10,2)                │
+│     anchors (ENU, m): (0,0,2) (0,10,2) (10,10,2) (10,0,2)                │
+│     (sinh động theo layout: X×Y, xoay α)                                  │
 └───────────────────────────────┬────────────────────────────────────────────┘
                                 │ PostUpdate() mỗi 1/20 s
                                 │ tìm tag link → tính range tới 4 anchor
@@ -38,8 +39,8 @@ ArduPilot SITL, gồm các topic, frame, đơn vị và các bước xử lý tr
 │ odometry_node  (Python, package uwb_pozyx_bridge)                          │
 │                                                                             │
 │  1. decode_ranging_pose()  : Pose → RangeMeasurement                       │
-│  2. solve_position()       : WLS trilateration → vị trí tag (ENU, m)       │
-│  3. enu_to_ned_m()         : ENU → NED (hoán đổi trục ngang, đảo trục dọc)│
+│  2. solve_position()       : WLS 3D chọn nhánh → vị trí tag (Anchor Frame) │
+│  3. AnchorLayout.to_ned_3d(): xoay α + dịch z → NED (tương đối EKF Origin)│
 │  4. build_odometry_message(): MAVLink ODOMETRY (id 331)                    │
 │  5. MavlinkSender.send()   : ghi MAVLink frame vào TCP 127.0.0.1:5761      │
 │                                                                             │
@@ -84,6 +85,11 @@ mô phỏng và tự tìm model xe theo tên.
 
 ### Cấu hình trong `uwb_runway.sdf`
 
+File này là **template**. Launch file sinh lại vị trí anchor theo layout
+(`layout_size_x_m`, `layout_size_y_m`, `layout_alpha_deg`) trước khi khởi động
+Gazebo, xem `uwb_pozyx_bridge/uwb_world.py::render_world`. Ở layout mặc định
+(hình vuông 10×10 m, α = 0):
+
 ```xml
 <plugin filename="uwb_gz_plugin" name="uwb_gz_plugin::systems::UwbSystem">
   <update_rate>20.0</update_rate>
@@ -94,9 +100,9 @@ mô phỏng và tự tìm model xe theo tên.
   <max_range>50.0</max_range>
   <los_std>0.05</los_std>
   <anchor name="uwb_anchor0"><pos>0 0 2.0</pos></anchor>
-  <anchor name="uwb_anchor1"><pos>10 0 2.0</pos></anchor>
+  <anchor name="uwb_anchor1"><pos>0 10 2.0</pos></anchor>
   <anchor name="uwb_anchor2"><pos>10 10 2.0</pos></anchor>
-  <anchor name="uwb_anchor3"><pos>0 10 2.0</pos></anchor>
+  <anchor name="uwb_anchor3"><pos>10 0 2.0</pos></anchor>
 </plugin>
 ```
 
@@ -192,11 +198,15 @@ Node Python nhận ranging, giải vị trí, đóng gói MAVLink `ODOMETRY`, g�
 | `serial_host` / `serial_port`                 | `127.0.0.1` / `5761`     | endpoint TCP tới SITL                      |
 | `send_rate`                                   | `20.0`                   | nhịp gửi message (Hz)                      |
 | `anchor_count`                                | `4`                      | số anchor                                  |
-| `anchor_offsets_mm`                           | `(-5000,-5000,1900)`, …  | vị trí anchor **tương đối UWB origin**, mm |
+| `layout_size_x_m`                             | `10.0`                   | cạnh `a0 → a1` của layout (Anchor Frame), m  |
+| `layout_size_y_m`                             | `10.0`                   | cạnh `a0 → a3` của layout (Anchor Frame), m  |
+| `layout_alpha_deg`                            | `0.0`                    | góc lệch α của layout so với NED (°)        |
+| `anchor_plane_height_m`                       | `2.0`                    | chiều cao mặt phẳng anchor so với mặt đất, m |
 | `position_std_m`                              | `0.05`                   | **độ lệch chuẩn** của estimate vị trí, mét |
 | `quality`                                     | `50`                     | quality gửi kèm (0–100)                    |
 | `reset_jump_threshold_m`                      | `2.0`                    | ngưỡng nhảy vị trí để bump reset counter   |
-| `assume_constant_z`                           | `True`                   | giữ altitude cố định                       |
+| `assume_constant_z`                           | `False`                  | giữ altitude cố định (mặc định: giải 3D)    |
+| `initial_guess`                               | `[5.0, 5.0, 1.0]`        | hạt giống cho solver (Anchor Frame)          |
 | `min_anchors`                                 | `3`                      | số anchor tối thiểu để có lời giải         |
 | `max_range`                                   | `50.0`                   | loại bỏ range vượt ngưỡng                  |
 | `los_std` / `nlos_soft_std` / `nlos_hard_std` | `0.10` / `0.30` / `0.60` | nhiễu theo LOS (m)                         |
@@ -218,7 +228,7 @@ solve_position(anchors, ranges)    # WLS trilateration
 _publish_pose(result)               # → /uwb/pose (PoseStamped, frame "world")
         │
         ▼
-north, east, down = enu_to_ned_m(x, y, z)   # ENU → NED
+north, east, down = layout.to_ned_3d(x, y, z)  # Anchor Frame → NED
         │
         ▼
 _detect_reset(...)                 # bump reset_counter nếu nhảy > threshold
@@ -248,11 +258,37 @@ return 1.0 / (sigma * sigma)
 
 
 
-### 5.4 Vì sao `assume_constant_z = True`
+### 5.4 Vì sao mặc định giải 3D chọn nhánh (`assume_constant_z = False`)
 
-Anchor nằm cùng một mặt phẳng (z = 2.0 m). Nếu giải full-3D, bài toán
-trilateration có **hai nghiệm** đối xứng qua mặt phẳng anchor, và solver có
-thể nhảy sang nghiệm sai. Giữ z cố định loại bỏ luôn nguồn sai này.
+Anchor nằm cùng một mặt phẳng (Anchor Frame `z = 0`) ⇒ chỉ từ khoảng cách đo
+được thì **không xác định được** tag nằm ở phía nào của mặt phẳng: một tag 1 m
+*dưới* mặt phẳng cho ra đúng những khoảng cách như một tag 1 m *trên* mặt phẳng.
+
+Cách cũ (giữ Z cố định) **không trung lập**: khoảng cách đo được sẽ không nhất
+quán với giả định về độ cao, và nghiệm ngang bị lệch. Đo thực nghiệm trên
+hình chữ nhật 10×10 m:
+
+| Chiều cao thật | Sai số ngang (2D, Z cố định) | Sai số ngang (3D, chọn nhánh) |
+| :-- | :-- | :-- |
+| 0.30 m | 0.074 m / p99 0.190 m | 0.045 m / p99 0.113 m |
+| 0.80 m | 0.067 m / p99 0.170 m | 0.046 m / p99 0.112 m |
+| 1.50 m | 0.050 m / p99 0.124 m | 0.047 m / p99 0.118 m |
+
+⇒ Solver 3D chọn nhánh giữ sai số ngang ở mức nhiễu đo (~0.05 m) **bất kể độ
+cao thật**.
+
+**Cơ chế chọn nhánh** (`trilateration.py` → `_solve_3d_branch`):
+
+1. Giải Gauss-Newton 3D từ **hai hạt giống**, một ở mỗi phía mặt phẳng anchor.
+2. Chọn hạt giống cho **nghiệm gần nghiệm trước** (`previous_position`) nhất ⇒
+   giữ đúng nhánh khi tag bay xuyên qua mặt phẳng.
+3. Nếu chưa có nghiệm trước, chọn theo residual nhỏ nhất.
+
+Node giữ `self._last_solution.position` và truyền vào solver làm `previous_position`.
+
+> Cờ `assume_constant_z = True` vẫn còn để dùng khi layout **không** đồng phẳng
+> (ví dụ anchor gắn trên trần và dưới sàn). Với layout đồng phẳng mặc định của
+> project, để `False`.
 
 ## 6. Tầng 4 — MAVLink `ODOMETRY` (id 331)
 
@@ -293,12 +329,22 @@ velPosObs[4] = extNavDataDelayed.pos.y;   // East
 
 Vì vậy position phải mang **NED**: `x` = North, `y` = East, `z` = Down.
 
-Gazebo world là ENU (x East, y North, z Up), nên phải **hoán đổi hai trục
-ngang** và **đảo trục dọc**:
+Gazebo world là ENU (x East, y North, z Up), còn solver giải trong **Anchor
+Frame** (`x` hướng `a1`, `y` hướng `a3`, `z` hướng xuống). Việc chuyển frame
+được gom vào `uwb_layout.py`:
 
 ```python
-def enu_to_ned_m(east_m, north_m, up_m):
-    return (float(north_m), float(east_m), -float(up_m))
+def rotate_ned(x: float, y: float, alpha_rad: float) -> tuple[float, float]:
+    cos_a = math.cos(alpha_rad)
+    sin_a = math.sin(alpha_rad)
+    return (x * cos_a - y * sin_a, x * sin_a + y * cos_a)
+```
+
+và `AnchorLayout.to_ned_3d()`:
+
+```python
+north, east = self.to_ned(x, y)          # xoay α + offset gốc
+return (north, east, z - self.plane_height_m)
 ```
 
 > ⚠️ Đây là **điểm duy nhất** được phép đổi frame trong codebase. Nếu hoán
@@ -318,13 +364,19 @@ vel = q * vel;
 ```
 
 Tức `vx`/`vy`/`vz` phải là theo **body FRD** (x forward, y right, z down). UWB
-trilateration không cho velocity estimate, nên node gửi `0` cho cả ba và
+trilateration không cho velocity estimate, nên node gửi **`NaN`** cho cả ba và
 `EK3_SRC1_VELXY` để `0` (NONE) — EKF không fuse velocity từ nguồn này.
 
-> Lưu ý: `handle_odometry()` vẫn gọi `handle_vision_speed_estimate()` với
-> vector zero. Điều đó set `useExtNavVel = true` trong EKF3, nhưng vì
-> `EK3_SRC1_VELXY = 0` thì `useVelXYSource(EXTNAV)` là false nên velocity
-> **không** được fuse. Đừng bật nguồn velocity nếu chưa có velocity thật.
+> `NaN` là cách **đúng**, không phải lỗi: ArduPilot reject mẫu NaN
+> (`AP_NavEKF3_Measurements.cpp`: `if (vel.is_nan() || isnan(err)) return;`) ⇒
+> `useExtNavVel` **không** được set ⇒ EKF3 tự tích phân vận tốc bằng IMU.
+>
+> Nếu gửi `0.0` thì EKF sẽ fuse "vận tốc bằng 0" — sai. Với
+> `EK3_SRC1_POSZ = 1` (BARO) thì thiệt hại chưa thấy ngay, nhưng nếu ai đó đổi
+> `EK3_SRC1_POSZ` sang `EXTNAV` thì drone bị **đóng băng vận tốc Z**.
+>
+> `velocity_covariance[0]` cũng đặt `NaN` — đúng theo MAVLink spec
+> *"If unknown, assign NaN value to first element in the array"*.
 
 
 
@@ -374,9 +426,12 @@ MAVLink v2:
 [0xFD][len][seq][sysid][compid][msgid=331][payload][crc][crc]
 ```
 
-- `sysid = 255` (khác `SYSID_THISMAV = 1` của ArduPilot), `compid = 190`.
+- `sysid = 255` (khác `SYSID_THISMAV = 1` của ArduPilot), `compid = 191`
+  (`MAV_COMP_ID_ONBOARD_COMPUTER` — khớp ESP32 tag).
 - Payload ODOMETRY dài 222 byte → frame ~245 byte.
 - Sequence number tăng dần, wrap ở 256.
+- `estimator_type = MAV_ESTIMATOR_TYPE_NAIVE` (1) — khớp ESP32 tag (solver
+  trilateration là một estimator *naive*, không phải VIO).
 
 > ArduPilot chấp nhận packet khi `msg.sysid == SYSID_MYGCS` (mặc định 255)
 > hoặc khi `SYSID_ENFORCE = 0`. `sysid = 255` khớp `SYSID_MYGCS` nên
@@ -473,7 +528,7 @@ Frame bị ảnh hưởng bởi hệ UWB:
 - `world` — frame world của Gazebo, dùng cho `/uwb/pose` và cho vị trí anchor
 trong trilateration.
 - `odom` — frame odom của Gazebo (odometry publisher, `odom_frame=odom`,
-`robot_base_frame=base_link`), được RViz dùng làm fixed frame.
+`robot_base_frame=base_link`), được RViz dùng  làm fixed frame.
 - `base_link` — frame của link gốc xe, là vị trí gắn tag UWB.
 
 > Lưu ý: frame `odom` do Gazebo sinh ra **không** phải frame `odom` của EKF3
@@ -518,7 +573,7 @@ RViz báo `No transform from [rotor_0] to [odom]`.
 | `odometry_node` chết với `PackageNotFoundError`            | build `uwb_pozyx_bridge` lỗi, mất package metadata | `colcon build --packages-up-to uwb_pozyx_bridge`            |
 | MAVProxy lặp `link 1 down`                                 | SITL cũ còn chiếm port 5760                        | `pkill -f arducopter; pkill -f mavproxy.py`                 |
 | EKF không báo `is using external nav data`                 | `VISO_TYPE` = 0, hoặc node chưa kết nối port 5761  | kiểm tra `VISO_TYPE 1` và log `messages_sent` của node      |
-| EKF fuse nhưng vị trí lệch gương (đối xứng qua đường chéo) | ENU → NED bị hoán đổi sai trục                     | dùng `enu_to_ned_m()`: `x` = North, `y` = East              |
+| EKF fuse nhưng vị trí lệch gương (đối xứng qua đường chéo) | Anchor Frame → NED bị hoán đổi sai trục     | dùng `AnchorLayout.to_ned_3d()`: `x` = North, `y` = East        |
 | EKF không lấy độ cao                                       | `EK3_SRC1_POSZ` bị đặt sai                         | đặt `EK3_SRC1_POSZ 1` (BARO)                                |
 | EKF bám quá chặt / innovation test fail                    | `VISO_POS_M_NSE` quá nhỏ                           | tăng `VISO_POS_M_NSE` (ví dụ `0.05` → `0.2`)                |
 | Drone bị "lật" khi bay vòng                                | position setpoint lệch vì EKF lệch frame           | kiểm tra `/uwb/pose` so với `LOCAL_POSITION_NED`            |
@@ -530,11 +585,11 @@ RViz báo `No transform from [rotor_0] to [odom]`.
 
 ## 11. Diễn giải protocol trong Python
 
-`mavlink_odometry.py` là **điểm duy nhất** được phép đổi frame. Mọi thứ
-khác giữ nguyên hệ ENU của Gazebo.
+`mavlink_odometry.py` là **điểm duy nhất** được phép đóng gói message. Mọi thứ
+khác giữ nguyên hệ Anchor Frame.
 
 ```python
-north_m, east_m, down_m = enu_to_ned_m(x_east, y_north, z_up)
+north_m, east_m, down_m = layout.to_ned_3d(x, y, z)   # Anchor Frame → NED
 message = build_odometry_message(
     north_m, east_m, down_m,
     time_usec=int(time.time() * 1e6),
@@ -543,6 +598,10 @@ message = build_odometry_message(
 )
 self._sender.send(message)
 ```
+
+`build_odometry_message()` đặt sẵn `velocity_ned = (NaN, NaN, NaN)` và
+`velocity_covariance[0] = NaN`, `estimator_type = MAV_ESTIMATOR_TYPE_NAIVE` —
+đúng như ESP32 tag gửi.
 
 `MavlinkSender` cố ý **tolerant**: nếu socket rớt (SITL restart) thì reconnect
 nền ở chu kỳ sau thay vì raise, và message không gửi được thì **drop** chứ

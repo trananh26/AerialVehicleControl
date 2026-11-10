@@ -5,8 +5,10 @@ Publishes ``geometry_msgs/Pose`` messages on the ranging topic using the same
 custom encoding as the Gazebo ``uwb_gz_plugin``, so the bridge node can be
 exercised end to end without starting Gazebo.
 
-The simulated tag orbits (or sits still at) a point inside the anchor square,
-and the ranges are computed from the true distances to each anchor.
+The simulated tag orbits (or sits still at) a point inside the anchor
+rectangle, and the ranges are computed from the true distances to each
+anchor.  The rectangle can be changed with ``--size-x`` / ``--size-y``, so
+the tool follows the layout the simulation uses.
 
 Usage::
 
@@ -28,17 +30,34 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
 )
 
-# The Gazebo world layout: anchors at the corners of a 10 m x 10 m square at
-# z = 2.0 m, and the vehicle spawning at the centre, (5, 5, 0.1).
-ANCHORS = [
-    (0, (0.0, 0.0, 2.0)),
-    (1, (10.0, 0.0, 2.0)),
-    (2, (10.0, 10.0, 2.0)),
-    (3, (0.0, 10.0, 2.0)),
-]
+#: The default Gazebo world layout: anchors at the corners of a 10 m x 10 m
+#: square at z = 2.0 m, and the vehicle spawning at the centre.
+DEFAULT_SIZE_X_M = 10.0
+DEFAULT_SIZE_Y_M = 10.0
+ANCHOR_PLANE_HEIGHT_M = 2.0
 
-# The tag's true position, relative to the beacon origin at (5, 5, 0.1).
+#: The tag's true altitude, relative to the ground.
 TAG_ALTITUDE = 0.1
+
+
+def build_anchors(size_x_m: float, size_y_m: float):
+    """The anchor positions of the layout, in the world frame.
+
+    Args:
+        size_x_m: The length of the ``a0 -> a1`` side, in metres.
+        size_y_m: The length of the ``a0 -> a3`` side, in metres.
+
+    Returns:
+        A list of ``(anchor_id, (x_m, y_m, z_m))`` pairs, in the anchor
+        frame with ``alpha = 0``.
+    """
+    z = ANCHOR_PLANE_HEIGHT_M
+    return [
+        (0, (0.0, 0.0, z)),
+        (1, (size_x_m, 0.0, z)),
+        (2, (size_x_m, size_y_m, z)),
+        (3, (0.0, size_y_m, z)),
+    ]
 
 
 def distance(a, b):
@@ -59,6 +78,8 @@ class FakeRangingSource(Node):
         orbit_radius: float = 2.0,
         orbit_period: float = 20.0,
         noise_std: float = 0.0,
+        size_x_m: float = DEFAULT_SIZE_X_M,
+        size_y_m: float = DEFAULT_SIZE_Y_M,
     ) -> None:
         super().__init__("fake_ranging_source")
 
@@ -67,6 +88,9 @@ class FakeRangingSource(Node):
         self.orbit_radius = orbit_radius
         self.orbit_period = orbit_period
         self.noise_std = noise_std
+        self.anchors = build_anchors(size_x_m, size_y_m)
+        # The tag orbits around the centre of the rectangle.
+        self.centre = (size_x_m / 2.0, size_y_m / 2.0)
         self._start = None
 
         qos = QoSProfile(
@@ -88,7 +112,7 @@ class FakeRangingSource(Node):
             phase = 2.0 * math.pi * t / self.orbit_period
             x = self.position[0] + self.orbit_radius * math.cos(phase)
             y = self.position[1] + self.orbit_radius * math.sin(phase)
-        return (x + 5.0, y + 5.0, TAG_ALTITUDE)
+        return (x + self.centre[0], y + self.centre[1], TAG_ALTITUDE)
 
     def _publish(self) -> None:
         if self._start is None:
@@ -97,7 +121,7 @@ class FakeRangingSource(Node):
 
         tag = self._tag_position(t)
 
-        for anchor_id, anchor_pos in ANCHORS:
+        for anchor_id, anchor_pos in self.anchors:
             rng = distance(tag, anchor_pos)
             if self.noise_std > 0.0:
                 rng += self._rng.gauss(0.0, self.noise_std)
@@ -127,6 +151,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--orbit-radius", type=float, default=2.0)
     parser.add_argument("--orbit-period", type=float, default=20.0)
     parser.add_argument("--noise-std", type=float, default=0.0)
+    parser.add_argument(
+        "--size-x",
+        type=float,
+        default=DEFAULT_SIZE_X_M,
+        help="length of the a0 -> a1 side of the anchor rectangle, metres",
+    )
+    parser.add_argument(
+        "--size-y",
+        type=float,
+        default=DEFAULT_SIZE_Y_M,
+        help="length of the a0 -> a3 side of the anchor rectangle, metres",
+    )
     args = parser.parse_args(argv)
 
     rclpy.init(args=None)
@@ -138,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
         orbit_radius=args.orbit_radius,
         orbit_period=args.orbit_period,
         noise_std=args.noise_std,
+        size_x_m=args.size_x,
+        size_y_m=args.size_y,
     )
     try:
         rclpy.spin(node)

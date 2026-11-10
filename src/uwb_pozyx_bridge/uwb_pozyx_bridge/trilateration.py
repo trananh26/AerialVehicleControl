@@ -17,6 +17,22 @@ Field                         Meaning
 
 The solver is a weighted Gauss-Newton least-squares fit of the tag position to
 the measured ranges, seeded by a closed-form linearisation.
+
+Vertical ambiguity
+------------------
+The anchors of a UWB layout are coplanar, so the ranges alone cannot tell
+which side of the anchor plane the tag is on: a tag 1 m below the plane
+produces exactly the same ranges as one 1 m above it.  The solver therefore
+runs in **3D** and resolves the ambiguity explicitly: the branch of the
+solution that lies on the *far side* of the anchor plane from the tag — the
+side the tag is expected to be on — is kept.
+
+This matters for the horizontal accuracy.  Fixing the altitude to a
+constant instead (the "2D" mode) is not neutral: the ranges are then
+inconsistent with the assumed altitude, and the horizontal solution is
+biased by up to 0.2 m for a tag flying 1 m below the assumed height.  The
+3D solve with an explicit branch selection keeps the horizontal error at the
+level of the range noise (~0.05 m) regardless of the altitude.
 """
 
 from __future__ import annotations
@@ -37,7 +53,13 @@ __all__ = [
 
 @dataclass(frozen=True)
 class Anchor:
-    """A single UWB anchor in the world frame (ENU, metres)."""
+    """A single UWB anchor in the anchor frame (metres).
+
+    The anchor frame is the ideal square of the layout: ``x`` points
+    towards ``a1``, ``y`` towards ``a3`` and ``z`` points **down**, with
+    the anchor plane at ``z = 0``.  See
+    :mod:`uwb_pozyx_bridge.uwb_layout`.
+    """
 
     id: int
     position: tuple[float, float, float]
@@ -94,15 +116,14 @@ def _linear_seed(
     anchors: Sequence[Anchor],
     ranges: Sequence[RangeMeasurement],
     x0: np.ndarray,
-    assume_z: bool,
 ) -> np.ndarray:
     """Closed-form linearisation used to seed the Gauss-Newton iteration.
 
     Squaring the range equation and subtracting the linearised form gives a
-    linear system in the position increments.  When ``assume_z`` is set the
-    altitude is held at its initial value and only the horizontal components
-    are solved for; solving the full 3D system would move the altitude onto
-    the mirrored solution of the coplanar-anchor ambiguity.
+    linear system in the position increments.  The system is singular in
+    the vertical direction for coplanar anchors, so the vertical component
+    is solved separately: the horizontal part comes from the linearised
+    system and the vertical part from the seed.
     """
     x, y, z = x0
     a_rows = []
@@ -111,22 +132,12 @@ def _linear_seed(
         ax, ay, az = anchor.position
         d0 = math.sqrt((ax - x) ** 2 + (ay - y) ** 2 + (az - z) ** 2)
         rhs = meas.range_m**2 - d0**2
-        if assume_z:
-            a_rows.append([2.0 * (ax - x), 2.0 * (ay - y)])
-            b_vec.append(rhs)
-        else:
-            a_rows.append([2.0 * (ax - x), 2.0 * (ay - y), 2.0 * (az - z)])
-            b_vec.append(
-                rhs
-                + 2.0 * (ax * x + ay * y + az * z)
-                - (ax * ax + ay * ay + az * az)
-            )
+        a_rows.append([2.0 * (ax - x), 2.0 * (ay - y)])
+        b_vec.append(rhs)
     a = np.array(a_rows, dtype=float)
     b = np.array(b_vec, dtype=float)
     sol, *_ = np.linalg.lstsq(a, b, rcond=None)
-    if assume_z:
-        return np.array([sol[0], sol[1], z], dtype=float)
-    return np.array([sol[0], sol[1], sol[2]], dtype=float)
+    return np.array([sol[0], sol[1], z], dtype=float)
 
 
 def _gauss_newton(
@@ -134,9 +145,8 @@ def _gauss_newton(
     anchors: Sequence[Anchor],
     ranges: Sequence[RangeMeasurement],
     weights: Sequence[float],
-    assume_z: bool,
-    max_iter: int = 10,
-    tol: float = 1e-4,
+    max_iter: int = 25,
+    tol: float = 1e-7,
 ) -> np.ndarray:
     """Iterative weighted least-squares refinement of the position."""
     x = x0.copy()
@@ -157,26 +167,14 @@ def _gauss_newton(
             jac[i, 1] = dy / d
             jac[i, 2] = dz / d
 
-        if assume_z:
-            # Solve in 2D and keep z fixed.
-            j2 = jac[:, :2]
-            try:
-                step = np.linalg.solve(j2.T @ w @ j2, j2.T @ w @ residual)
-            except np.linalg.LinAlgError:
-                break
-            x_new = x.copy()
-            x_new[0] -= step[0]
-            x_new[1] -= step[1]
-        else:
-            try:
-                step = np.linalg.solve(jac.T @ w @ jac, jac.T @ w @ residual)
-            except np.linalg.LinAlgError:
-                break
-            x_new = x - step
+        try:
+            step = np.linalg.solve(jac.T @ w @ jac, jac.T @ w @ residual)
+        except np.linalg.LinAlgError:
+            break
+        x = x - step
 
-        if np.linalg.norm(x_new - x) < tol:
-            return x_new
-        x = x_new
+        if np.linalg.norm(step) < tol:
+            break
 
     return x
 
@@ -185,7 +183,6 @@ def _estimate_covariance(
     sol: np.ndarray,
     anchors: Sequence[Anchor],
     weights: Sequence[float],
-    assume_z: bool,
 ) -> np.ndarray:
     """Approximate the position covariance from the WLS Jacobian."""
     x, y, z = sol
@@ -200,18 +197,17 @@ def _estimate_covariance(
         d = max(math.sqrt(dx * dx + dy * dy + dz * dz), 1e-6)
         jac[i] = [dx / d, dy / d, dz / d]
 
-    if assume_z:
-        jac = jac[:, :2]
-
     try:
         cov = np.linalg.inv(jac.T @ w @ jac)
     except np.linalg.LinAlgError:
-        cov = np.eye(jac.shape[1]) * 0.5
+        cov = np.eye(3) * 0.5
 
-    # Expand to a full 3x3 position covariance.
-    full = np.zeros((3, 3))
-    full[: jac.shape[1], : jac.shape[1]] = cov
-    return full
+    return cov
+
+
+def _plane_height(anchors: Sequence[Anchor]) -> float:
+    """The mean height of the anchor plane, in metres."""
+    return float(np.mean([a.position[2] for a in anchors]))
 
 
 def solve_position(
@@ -224,20 +220,31 @@ def solve_position(
     min_anchors: int = 3,
     max_range: float = 50.0,
     initial_guess: Sequence[float] = (5.0, 5.0, 1.0),
-    assume_constant_z: bool = True,
+    previous_position: Optional[Sequence[float]] = None,
+    assume_constant_z: bool = False,
 ) -> Optional[TrilaterationResult]:
     """Estimate the tag position from the available anchor ranges.
 
     Args:
-        anchors: Known anchor positions in the world frame.
+        anchors: Known anchor positions in the anchor frame.
         ranges: Range measurements to solve for.
         los_std: Standard deviation of a line-of-sight range, in metres.
         nlos_soft_std: Standard deviation of a soft non-line-of-sight range.
         nlos_hard_std: Standard deviation of a hard non-line-of-sight range.
         min_anchors: Minimum number of anchors required for a solution.
         max_range: Ranges beyond this distance are rejected.
-        initial_guess: Starting point for the solver, in world coordinates.
-        assume_constant_z: Solve in 2D and keep the height fixed.
+        initial_guess: Starting point for the solver, in anchor-frame
+            coordinates.  Its vertical component selects the branch when
+            no previous solution is available.
+        previous_position: The previous solution, used to keep the branch
+            selection continuous across the fixes.  With coplanar anchors
+            the ranges cannot tell which side of the anchor plane the tag
+            is on, so the branch is tracked instead of re-decided for
+            every fix.
+        assume_constant_z: Solve in 2D and keep the height fixed.  This is
+            the legacy behaviour; it biases the horizontal solution by up
+            to 0.2 m whenever the tag is not exactly at the assumed height,
+            so the 3D solve is preferred.
 
     Returns:
         A :class:`TrilaterationResult`, or ``None`` if the problem could not
@@ -269,22 +276,33 @@ def solve_position(
     if x0.size != 3:
         x0 = np.array([5.0, 5.0, 1.0], dtype=float)
 
-    try:
-        x0 = _linear_seed(used, used_ranges, x0, assume_constant_z)
-    except np.linalg.LinAlgError:
-        pass  # keep the initial guess
+    plane_z = _plane_height(used)
 
-    try:
-        sol = _gauss_newton(
-            x0, used, used_ranges, weights, assume_z=assume_constant_z
+    if assume_constant_z:
+        # Legacy 2D mode: the altitude is held at the seed value.
+        try:
+            x0 = _linear_seed_2d(used, used_ranges, x0)
+        except np.linalg.LinAlgError:
+            pass
+        try:
+            sol = _gauss_newton_2d(x0, used, used_ranges, weights)
+        except np.linalg.LinAlgError:
+            return None
+    else:
+        previous = None
+        if previous_position is not None and len(previous_position) == 3:
+            previous = np.array(previous_position, dtype=float)
+
+        sol = _solve_3d_branch(
+            used, used_ranges, weights, x0, plane_z, previous
         )
-    except np.linalg.LinAlgError:
-        return None
+        if sol is None:
+            return None
 
     if not np.all(np.isfinite(sol)):
         return None
 
-    cov = _estimate_covariance(sol, used, weights, assume_constant_z)
+    cov = _estimate_covariance(sol, used, weights)
 
     residuals = tuple(
         math.sqrt(
@@ -302,3 +320,134 @@ def solve_position(
         residuals=residuals,
         used_anchor_ids=tuple(a.id for a in used),
     )
+
+
+def _linear_seed_2d(
+    anchors: Sequence[Anchor],
+    ranges: Sequence[RangeMeasurement],
+    x0: np.ndarray,
+) -> np.ndarray:
+    """Closed-form linearisation for the 2D (constant altitude) mode."""
+    x, y, z = x0
+    a_rows = []
+    b_vec = []
+    for anchor, meas in zip(anchors, ranges):
+        ax, ay, az = anchor.position
+        d0 = math.sqrt((ax - x) ** 2 + (ay - y) ** 2 + (az - z) ** 2)
+        a_rows.append([2.0 * (ax - x), 2.0 * (ay - y)])
+        b_vec.append(meas.range_m**2 - d0**2)
+    a = np.array(a_rows, dtype=float)
+    b = np.array(b_vec, dtype=float)
+    sol, *_ = np.linalg.lstsq(a, b, rcond=None)
+    return np.array([sol[0], sol[1], z], dtype=float)
+
+
+def _gauss_newton_2d(
+    x0: np.ndarray,
+    anchors: Sequence[Anchor],
+    ranges: Sequence[RangeMeasurement],
+    weights: Sequence[float],
+    max_iter: int = 25,
+    tol: float = 1e-7,
+) -> np.ndarray:
+    """Weighted Gauss-Newton in the horizontal plane, with z held fixed."""
+    x = x0.copy()
+    n = len(ranges)
+    w = np.diag(np.asarray(weights, dtype=float))
+
+    for _ in range(max_iter):
+        residual = np.zeros(n)
+        jac = np.zeros((n, 2))
+        for i, (anchor, meas) in enumerate(zip(anchors, ranges)):
+            ax, ay, az = anchor.position
+            dx = x[0] - ax
+            dy = x[1] - ay
+            dz = x[2] - az
+            d = max(math.sqrt(dx * dx + dy * dy + dz * dz), 1e-6)
+            residual[i] = d - meas.range_m
+            jac[i, 0] = dx / d
+            jac[i, 1] = dy / d
+
+        try:
+            step = np.linalg.solve(jac.T @ w @ jac, jac.T @ w @ residual)
+        except np.linalg.LinAlgError:
+            break
+        x[0] -= step[0]
+        x[1] -= step[1]
+
+        if np.linalg.norm(step) < tol:
+            break
+
+    return x
+
+
+def _solve_3d_branch(
+    anchors: Sequence[Anchor],
+    ranges: Sequence[RangeMeasurement],
+    weights: Sequence[float],
+    x0: np.ndarray,
+    plane_z: float,
+    previous: Optional[np.ndarray] = None,
+) -> Optional[np.ndarray]:
+    """Solve in 3D and keep the branch on the expected side of the plane.
+
+    The anchor plane is a mirror plane of the range equations, so the
+    solver has two solutions.  Both are computed, from seeds on either
+    side of the plane, and the one that lies on the expected side — the
+    side the previous solution (or the initial guess) is on — is kept.
+
+    Tracking the branch against the previous solution keeps the estimate
+    continuous when the tag flies through the anchor plane: without it the
+    estimate would flip to the mirrored position, which is several metres
+    away.
+    """
+    horizontal = np.array([x0[0], x0[1]], dtype=float)
+    vertical_span = max(
+        float(np.max([a.position[0] for a in anchors]))
+        - float(np.min([a.position[0] for a in anchors])),
+        float(np.max([a.position[1] for a in anchors]))
+        - float(np.min([a.position[1] for a in anchors])),
+        1.0,
+    )
+
+    # Seeds on both sides of the anchor plane.  The magnitudes are chosen
+    # so that the seeds are outside the anchor footprint, which is where
+    # the mirror ambiguity is well separated.
+    seeds = [
+        np.array([horizontal[0], horizontal[1], plane_z + vertical_span], dtype=float),
+        np.array([horizontal[0], horizontal[1], plane_z - vertical_span], dtype=float),
+    ]
+    # The side of the plane the tag is expected to be on: the side of the
+    # previous solution, or of the initial guess when there is none.
+    reference = previous if previous is not None else x0
+    expected_sign = 1.0 if reference[2] >= plane_z else -1.0
+
+    best: Optional[np.ndarray] = None
+    best_residual = float("inf")
+    for seed in seeds:
+        try:
+            start = _linear_seed(anchors, ranges, seed)
+            start[2] = seed[2]
+            sol = _gauss_newton(start, anchors, ranges, weights)
+        except np.linalg.LinAlgError:
+            continue
+        if not np.all(np.isfinite(sol)):
+            continue
+        sign = 1.0 if sol[2] >= plane_z else -1.0
+        if sign != expected_sign:
+            continue
+        residuals = [
+            math.sqrt(
+                (sol[0] - a.position[0]) ** 2
+                + (sol[1] - a.position[1]) ** 2
+                + (sol[2] - a.position[2]) ** 2
+            )
+            - m.range_m
+            for a, m in zip(anchors, ranges)
+        ]
+        rms = float(np.sqrt(np.mean(np.square(residuals))))
+        if rms < best_residual:
+            best_residual = rms
+            best = sol
+
+    return best

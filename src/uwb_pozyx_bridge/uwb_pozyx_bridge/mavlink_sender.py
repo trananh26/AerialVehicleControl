@@ -33,8 +33,10 @@ __all__ = ["MavlinkSender", "SYSTEM_ID"]
 #: silently dropped.
 SYSTEM_ID = 255
 
-#: MAVLink component id of the companion node.
-COMPONENT_ID = 190
+#: MAVLink component id of the companion node.  It matches the ESP32 tag
+#: (``MAV_COMP_ID_ONBOARD_COMPUTER``) so that both ends of the link are
+#: indistinguishable at the framing level.
+COMPONENT_ID = 191
 
 
 class MavlinkSender:

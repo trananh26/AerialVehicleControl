@@ -42,7 +42,10 @@ The velocity fields *are* transformed by ArduPilot::
 
 so ``vx``/``vy``/``vz`` are expected in the body FRD frame (x forward,
 y right, z down).  This node only publishes positions, so the velocities are
-left at zero and the EKF velocity source stays disabled.
+sent as ``NaN``, which is how the MAVLink specification expresses "no
+velocity estimate".  ArduPilot rejects such a sample in
+``NavEKF3_core::writeExtNavVelData()``, so the EKF keeps integrating the
+IMU instead of fusing a bogus zero velocity.
 
 Covariance
 ----------
@@ -54,6 +57,10 @@ than from a dedicated accuracy field::
 Only the diagonal entries ``[0]``, ``[6]`` and ``[11]`` (the position part of
 the 6x6 pose covariance) are used; they hold *variances*, so they are the
 square of the standard deviation.
+
+The velocity covariance is not read by ArduPilot at all.  It is sent as
+``NaN`` in the first element, per the MAVLink specification for an unknown
+velocity, which is also what the ESP32 tag does.
 """
 
 from __future__ import annotations
@@ -63,7 +70,7 @@ from typing import Sequence
 __all__ = [
     "MAV_FRAME_LOCAL_FRD",
     "MAV_FRAME_BODY_FRD",
-    "MAV_ESTIMATOR_TYPE_VIO",
+    "MAV_ESTIMATOR_TYPE_NAIVE",
     "ODOMETRY_MSG_ID",
     "SET_GPS_GLOBAL_ORIGIN_MSG_ID",
     "HOME_POSITION_MSG_ID",
@@ -71,6 +78,7 @@ __all__ = [
     "MAV_CMD_REQUEST_MESSAGE",
     "enu_to_ned_m",
     "pose_covariance_1d",
+    "velocity_covariance_unknown",
     "build_odometry_message",
     "build_set_gps_global_origin_message",
     "build_do_set_home_message",
@@ -85,9 +93,20 @@ MAV_FRAME_LOCAL_FRD = 20
 #: child frame of an ODOMETRY message.
 MAV_FRAME_BODY_FRD = 12
 
-#: ``MAV_ESTIMATOR_TYPE_VIO``.  ArduPilot ignores the estimator type, but
-#: VIO is the honest description of the source.
-MAV_ESTIMATOR_TYPE_VIO = 2
+#: ``MAV_ESTIMATOR_TYPE_NAIVE``.  ArduPilot ignores the estimator type
+#: entirely, but both ends of the link have to send the same value so that
+#: the two implementations can be compared byte for byte.
+#:
+#: MAVLink 2.x has no ``MAV_ESTIMATOR_TYPE_UWB``.  The official enum is
+#: ``UNKNOWN = 0``, ``NAIVE = 1``, ``VISION = 2``, ``VIO = 3``, ``GPS = 4``,
+#: ``GPS_INS = 5``, ``MOCAP = 6``, ``LIDAR = 7``, ``AUTOPILOT = 8``.  A
+#: trilateration solver is a *naive* estimator — it produces a position
+#: from ranges without any covariance feedback — so ``NAIVE`` is the
+#: honest choice.
+#:
+#: Note that the ESP32 tag used to send ``MAV_ESTIMATOR_TYPE_NAIVE`` as
+#: well, so the two sides now agree.
+MAV_ESTIMATOR_TYPE_NAIVE = 1
 
 #: The MAVLink message id of ODOMETRY.
 ODOMETRY_MSG_ID = 331
@@ -155,6 +174,31 @@ def pose_covariance_1d(
     return cov
 
 
+def velocity_covariance_unknown() -> list[float]:
+    """Build the velocity covariance for "no velocity estimate".
+
+    The MAVLink specification says:
+
+        *If the velocity is unknown, assign NaN to the first element of the
+        covariance matrix.*
+
+    The UWB ranging data carries no velocity estimate at all, so the
+    honest thing to send is ``NaN``.  This also matches the ESP32 tag,
+    which sends the same thing.
+
+    ArduPilot does not read the velocity covariance at all, so this field
+    is purely informational — but it is the difference between "the
+    velocities are zero" and "there is no velocity estimate", and the
+    latter is what is true.
+
+    Returns:
+        A 21-element list whose first entry is ``NaN``.
+    """
+    cov = [0.0] * 21
+    cov[0] = float("nan")
+    return cov
+
+
 def build_odometry_message(
     north_m: float,
     east_m: float,
@@ -162,7 +206,7 @@ def build_odometry_message(
     time_usec: int,
     *,
     position_std_m: float = 0.05,
-    velocity_ned: Sequence[float] = (0.0, 0.0, 0.0),
+    velocity_ned: Sequence[float] = (float("nan"),) * 3,
     angular_rate: Sequence[float] = (0.0, 0.0, 0.0),
     quaternion: Sequence[float] = (1.0, 0.0, 0.0, 0.0),
     quality: int = 50,
@@ -179,9 +223,12 @@ def build_odometry_message(
             clock, so wall-clock time is the right thing to send.
         position_std_m: Standard deviation of the position estimate, in
             metres.  It is squared to obtain the covariance entries.
-        velocity_ned: Linear velocity in m/s.  ArduPilot interprets these
-            as body FRD and rotates them into NED itself, so leave this at
-            zero unless a real body-frame velocity estimate is available.
+        velocity_ned: Linear velocity in m/s, in the body FRD frame.
+            ArduPilot rotates these into NED itself.  The default is
+            ``NaN``, which is how "no velocity estimate" is expressed:
+            ``NavEKF3_core::writeExtNavVelData()`` rejects the whole sample
+            when the velocity is ``NaN``, so the EKF keeps integrating the
+            IMU instead of fusing a bogus zero velocity.
         angular_rate: Angular rate in rad/s, in the same body FRD frame as
             the velocity.
         quaternion: Body-to-earth attitude quaternion, ``(w, x, y, z)``.
@@ -211,9 +258,9 @@ def build_odometry_message(
         pitchspeed=float(angular_rate[1]),
         yawspeed=float(angular_rate[2]),
         pose_covariance=pose_covariance_1d(variance, variance, variance),
-        velocity_covariance=[0.0] * 21,
+        velocity_covariance=velocity_covariance_unknown(),
         reset_counter=int(reset_counter),
-        estimator_type=MAV_ESTIMATOR_TYPE_VIO,
+        estimator_type=MAV_ESTIMATOR_TYPE_NAIVE,
         quality=int(quality),
     )
 
