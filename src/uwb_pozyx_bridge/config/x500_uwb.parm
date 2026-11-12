@@ -224,6 +224,21 @@ EK3_SRC1_POSZ 1
 # velocities of the ODOMETRY message, which are all zero here.
 EK3_SRC1_VELXY 0
 EK3_SRC1_VELZ 0
+# EK3_SRC1_YAW: 1 = COMPASS.  This has to stay 1.
+#
+# The node sends NO attitude: the quaternion of the ODOMETRY message is all
+# NaN.  ArduPilot nevertheless extracts the yaw out of that quaternion
+# (NavEKF3_core::writeExtNavData()), and with EK3_SRCx_YAW = EXTNAV (6) it
+# would align the EKF yaw to it and then fuse it continuously.  An identity
+# quaternion would therefore mean "heading North" and would drag the whole
+# heading of the vehicle to 0°.
+#
+# With the NaN quaternion the yaw branch is skipped entirely, but that also
+# means there is NO external yaw source at all: with EK3_SRCx_YAW = EXTNAV
+# the EKF cannot initialise and refuses to arm ("Arm: Need Position
+# Estimate").  So the compass has to stay the yaw source.
+#
+# See docs/UWB_ROS_ESP32_COMPARISON.md §11.2.
 EK3_SRC1_YAW 1
 AHRS_EKF_TYPE 3
 

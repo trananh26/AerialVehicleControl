@@ -18,11 +18,6 @@ path = src/ardupilot_sitl_models
 url = https://github.com/NguyenAn20279/SITL_Models.git
 branch = x500_model
 
-[submodule "src/micro_ros_agent"]
-path = src/micro_ros_agent
-url = https://github.com/NguyenAn20279/micro-ROS-Agent.git
-branch = x500_model
-
 [submodule "src/ros_gz"]
 path = src/ros_gz
 url = https://github.com/NguyenAn20279/ros_gz.git

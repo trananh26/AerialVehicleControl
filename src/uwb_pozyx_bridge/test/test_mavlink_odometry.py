@@ -30,6 +30,7 @@ from uwb_pozyx_bridge.mavlink_odometry import (
     build_set_gps_global_origin_message,
     enu_to_ned_m,
     pose_covariance_1d,
+    unknown_attitude_quaternion,
 )
 
 # ------------------------------------------------------------ frame ids
@@ -235,6 +236,42 @@ def test_quality_is_carried():
     msg = build_odometry_message(0.0, 0.0, 0.0, 1_000_000, quality=42)
 
     assert msg.quality == 42
+
+
+# -------------------------------------------------------------- attitude
+
+
+def test_quaternion_is_nan_by_default():
+    """The message carries no attitude estimate.
+
+    The UWB trilateration produces a position, never an attitude.  ArduPilot
+    extracts the yaw from the quaternion of an ``ODOMETRY`` message and, when
+    the external navigation source is selected for yaw, aligns and then
+    continuously fuses the EKF yaw to it.  A finite quaternion would
+    therefore claim a heading the system does not know: the identity
+    quaternion means "heading North", which drags the vehicle to 0°.
+
+    ``NaN`` is the honest encoding of "no attitude estimate".
+    """
+    msg = build_odometry_message(0.0, 0.0, 0.0, 1_000_000)
+
+    assert all(math.isnan(component) for component in msg.q)
+
+
+def test_the_quaternion_can_be_overridden():
+    """A caller may still supply a real attitude, e.g. from another source."""
+    msg = build_odometry_message(
+        0.0, 0.0, 0.0, 1_000_000, quaternion=(1.0, 0.0, 0.0, 0.0)
+    )
+
+    assert msg.q == [1.0, 0.0, 0.0, 0.0]
+
+
+def test_unknown_attitude_quaternion_is_all_nan():
+    quat = unknown_attitude_quaternion()
+
+    assert len(quat) == 4
+    assert all(math.isnan(component) for component in quat)
 
 
 # ------------------------------------------------- EKF origin declaration

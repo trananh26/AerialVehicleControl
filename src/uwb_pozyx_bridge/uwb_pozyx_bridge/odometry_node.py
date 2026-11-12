@@ -26,6 +26,23 @@ ranging data does not provide a velocity estimate, so they are sent as
    The position of an ``ODOMETRY`` message is **not** transformed by
    ArduPilot; it is fused into the EKF as it arrives, and the EKF works in
    NED.  See :mod:`uwb_pozyx_bridge.mavlink_odometry` for the details.
+
+.. note::
+   Despite the package name, this is **not** a Pozyx/Beacon bridge.  ArduPilot's
+   Pozyx Beacon protocol (``BCN_TYPE = 1``, serial protocol 13) and its layout
+   conventions (N pattern, lowest ID at the origin, ``BCN_ORIENT_YAW``) do not
+   apply here: the position is solved offboard and delivered as a plain
+   ``ODOMETRY`` message, so ArduPilot never sees the anchors.  The anchor layout
+   is therefore free-form (see :mod:`uwb_pozyx_bridge.uwb_layout`).
+   Details: ``docs/NOTES.md``.
+
+.. note::
+   The node sends **no attitude**: the quaternion of the ``ODOMETRY`` message
+   is all ``NaN``.  The UWB trilateration produces a position, never an
+   attitude, and ArduPilot reads the yaw out of that quaternion — with
+   ``EK3_SRCx_YAW = EXTNAV`` a finite quaternion would drag the heading of
+   the vehicle to whatever it encodes.  See
+   :func:`uwb_pozyx_bridge.mavlink_odometry.unknown_attitude_quaternion`.
 """
 
 from __future__ import annotations
@@ -46,6 +63,7 @@ from .mavlink_odometry import (
     build_do_set_home_message,
     build_odometry_message,
     build_set_gps_global_origin_message,
+    unknown_attitude_quaternion,
 )
 from .mavlink_sender import MavlinkSender
 from .trilateration import Anchor, RangeMeasurement, solve_position
@@ -141,6 +159,26 @@ class OdometryBridgeNode(Node):
         # ODOMETRY message, so this value ends up as the variance of the
         # position entries.
         self.declare_parameter("position_std_m", 0.05)
+
+        # The attitude quaternion of the ODOMETRY message.  The UWB
+        # trilateration produces a position, never an attitude, so the
+        # default is "no attitude estimate", which is encoded as a
+        # quaternion whose four components are all NaN.
+        #
+        # This must stay NaN: ArduPilot extracts the yaw from the
+        # quaternion and, with EK3_SRCx_YAW = EXTNAV, aligns and then
+        # continuously fuses the EKF yaw to it.  A finite quaternion would
+        # therefore claim a heading the system does not know.
+        #
+        # The parameter exists so that the behaviour can be A/B tested
+        # against the old, broken behaviour; "identity" reproduces it.
+        self.declare_parameter("attitude_quaternion", "unknown")
+        self._attitude_quaternion = self._resolve_attitude_quaternion()
+        # The raw value the parameter was last resolved from, so that a
+        # change of the parameter at runtime is picked up.
+        self._attitude_quaternion_raw = str(
+            self.get_parameter("attitude_quaternion").value
+        ).strip()
 
         # Quality of the estimate, 0 to 100.  ArduPilot only forwards a
         # message to the EKF when the quality is at least VISO_QUAL_MIN.
@@ -361,12 +399,23 @@ class OdometryBridgeNode(Node):
 
         self._detect_reset(north_m, east_m, down_m)
 
+        # Pick up a runtime change of the attitude quaternion parameter, so
+        # that the A/B test does not need a restart of the stack.
+        raw = str(self.get_parameter("attitude_quaternion").value).strip()
+        if raw != self._attitude_quaternion_raw:
+            self._attitude_quaternion_raw = raw
+            self._attitude_quaternion = self._resolve_attitude_quaternion()
+            self.get_logger().info(
+                f"attitude_quaternion is now '{raw}'"
+            )
+
         message = build_odometry_message(
             north_m,
             east_m,
             down_m,
             time.time_ns() // 1000,
             position_std_m=float(self.get_parameter("position_std_m").value),
+            quaternion=self._attitude_quaternion,
             quality=int(self.get_parameter("quality").value),
             reset_counter=self._reset_counter,
         )
@@ -541,6 +590,44 @@ class OdometryBridgeNode(Node):
         if msg_type == "ORIGIN":
             self._origin_confirmed = True
             self.get_logger().info("ArduPilot confirms the EKF origin")
+
+    def _resolve_attitude_quaternion(self) -> list[float]:
+        """Resolve the ``attitude_quaternion`` parameter.
+
+        The parameter accepts:
+
+        ``unknown``
+            The default: no attitude estimate, encoded as a quaternion whose
+            four components are all ``NaN``.
+        ``identity``
+            The identity quaternion ``(1, 0, 0, 0)``.  This reproduces the
+            old, broken behaviour and is only useful for A/B testing: it
+            decodes to yaw = 0, which ArduPilot would fuse into the EKF as
+            "heading North".
+
+        Returns:
+            The four components of the quaternion.
+        """
+        value = str(self.get_parameter("attitude_quaternion").value).strip()
+
+        if value.lower() == "identity":
+            return [1.0, 0.0, 0.0, 0.0]
+        if value.lower() == "unknown":
+            return unknown_attitude_quaternion()
+
+        # An explicit "w,x,y,z" list, for completeness.
+        parts = [p.strip() for p in value.split(",")]
+        if len(parts) == 4:
+            try:
+                return [float(p) for p in parts]
+            except ValueError:
+                pass
+
+        self.get_logger().warning(
+            f"attitude_quaternion '{value}' is not understood; "
+            "sending 'unknown' (all NaN)"
+        )
+        return unknown_attitude_quaternion()
 
     def _detect_reset(
         self, north_m: float, east_m: float, down_m: float

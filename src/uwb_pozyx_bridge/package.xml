@@ -6,6 +6,11 @@
   <description>
     Bridges Gazebo UWB ranging to ArduPilot's external navigation source by
     sending MAVLink ODOMETRY (331) messages over a serial port.
+
+    Despite the package name, this is NOT a Pozyx/Beacon bridge: ArduPilot's
+    Pozyx Beacon protocol and its layout conventions (N pattern, BCN_ORIENT_YAW)
+    do not apply here.  The anchor layout is free-form and defined by
+    uwb_layout.py.  See docs/NOTES.md.
   </description>
   <maintainer email="an@todo.todo">an</maintainer>
   <license>Apache-2.0</license>

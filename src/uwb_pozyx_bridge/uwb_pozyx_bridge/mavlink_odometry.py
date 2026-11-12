@@ -61,6 +61,31 @@ square of the standard deviation.
 The velocity covariance is not read by ArduPilot at all.  It is sent as
 ``NaN`` in the first element, per the MAVLink specification for an unknown
 velocity, which is also what the ESP32 tag does.
+
+Attitude convention
+-------------------
+The UWB trilateration produces a **position only** — it says nothing about
+the attitude of the vehicle.  The attitude quaternion is nevertheless part of
+the message, and ArduPilot does read it: it extracts the yaw from it and,
+when the external navigation source is selected for yaw, aligns and then
+continuously fuses the EKF yaw to it.
+
+    // protect against attitude or angle being NaN
+    if (!quat.is_nan() && !isnan(angErr)) {
+        quat.to_euler(roll_rad, pitch_rad, yaw_rad);
+        extNavYawAngDataNew.yawAng = yaw_rad;              // <-- yaw is taken
+        ...
+        storedExtNavYawAng.push(extNavYawAngDataNew);
+    }
+
+Sending the **identity** quaternion ``(1, 0, 0, 0)`` would therefore mean
+"the vehicle is heading North", and with ``EK3_SRCx_YAW = EXTNAV`` it drags
+the whole heading of the vehicle to 0°.  The honest encoding of "there is no
+attitude estimate" is ``NaN``: the ``is_nan()`` guard above then skips the
+yaw branch entirely, while the position is still pushed and fused normally.
+
+This module therefore sends a quaternion whose four components are all
+``NaN``.
 """
 
 from __future__ import annotations
@@ -79,6 +104,7 @@ __all__ = [
     "enu_to_ned_m",
     "pose_covariance_1d",
     "velocity_covariance_unknown",
+    "unknown_attitude_quaternion",
     "build_odometry_message",
     "build_set_gps_global_origin_message",
     "build_do_set_home_message",
@@ -199,6 +225,36 @@ def velocity_covariance_unknown() -> list[float]:
     return cov
 
 
+def unknown_attitude_quaternion() -> list[float]:
+    """Build the quaternion for "no attitude estimate".
+
+    The UWB trilateration gives a position, never an attitude.  ArduPilot
+    nevertheless reads the yaw out of the attitude quaternion of an
+    ``ODOMETRY`` message and, when the external navigation source is
+    selected for yaw, aligns and then continuously fuses the EKF yaw to it::
+
+        // protect against attitude or angle being NaN
+        if (!quat.is_nan() && !isnan(angErr)) {
+            quat.to_euler(roll_rad, pitch_rad, yaw_rad);
+            extNavYawAngDataNew.yawAng = yaw_rad;
+            ...
+            storedExtNavYawAng.push(extNavYawAngDataNew);
+        }
+
+    The identity quaternion ``(1, 0, 0, 0)`` decodes to yaw = 0, i.e. "the
+    vehicle is heading North", and would therefore steer the heading of the
+    vehicle to 0° when ``EK3_SRCx_YAW = EXTNAV``.
+
+    A quaternion whose components are all ``NaN`` is the honest encoding of
+    "no attitude estimate": ``Quaternion::is_nan()`` returns true, so the yaw
+    branch is skipped entirely, while the position is still fused.
+
+    Returns:
+        A four-element list of ``NaN``.
+    """
+    return [float("nan")] * 4
+
+
 def build_odometry_message(
     north_m: float,
     east_m: float,
@@ -208,7 +264,7 @@ def build_odometry_message(
     position_std_m: float = 0.05,
     velocity_ned: Sequence[float] = (float("nan"),) * 3,
     angular_rate: Sequence[float] = (0.0, 0.0, 0.0),
-    quaternion: Sequence[float] = (1.0, 0.0, 0.0, 0.0),
+    quaternion: Sequence[float] | None = None,
     quality: int = 50,
     reset_counter: int = 0,
 ):
@@ -232,6 +288,10 @@ def build_odometry_message(
         angular_rate: Angular rate in rad/s, in the same body FRD frame as
             the velocity.
         quaternion: Body-to-earth attitude quaternion, ``(w, x, y, z)``.
+            The default is ``None``, which means "no attitude estimate" and
+            is encoded as a quaternion whose four components are all
+            ``NaN``.  See :func:`unknown_attitude_quaternion` for why the
+            identity quaternion must not be used here.
         quality: Quality of the estimate, 0 to 100.
         reset_counter: Incremented when the position jumps discontinuously.
 
@@ -242,6 +302,9 @@ def build_odometry_message(
 
     std = float(position_std_m)
     variance = std * std
+
+    if quaternion is None:
+        quaternion = unknown_attitude_quaternion()
 
     return mavlink.MAVLink_odometry_message(
         time_usec=int(time_usec),
