@@ -641,3 +641,4 @@ Ghi chú: ________________________________
 | `tools/check_rect_layout.cpp` | Test host solver với rectangle (chạy khi đổi thuật toán) |
 | ROS: `docs/UWB_ANCHOR_LAYOUT.md` | Quy ước layout & công thức xoay |
 | ROS: `docs/UWB_ROS_ESP32_COMPARISON.md` | Bảng đối chiếu từng trường ESP32 ↔ ROS |
+| ROS: `docs/NOTES.md` | Sổ ghi chú các kết luận tra cứu source ArduPilot (vd: Pozyx vs ODOMETRY) |

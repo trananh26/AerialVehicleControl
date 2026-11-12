@@ -22,11 +22,6 @@ repositories:
     url: https://github.com/NguyenAn20279/SITL_Models.git
     version: x500_model
 
-  micro_ros_agent:
-    type: git
-    url: https://github.com/NguyenAn20279/micro-ROS-Agent.git
-    version: x500_model
-
   ros_gz:
     type: git
     url: https://github.com/NguyenAn20279/ros_gz.git

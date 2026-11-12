@@ -349,7 +349,8 @@ return (north, east, z - self.plane_height_m)
 
 > ⚠️ Đây là **điểm duy nhất** được phép đổi frame trong codebase. Nếu hoán
 > đổi sai, vị trí EKF bị phản chiếu qua đường chéo và drone bay tới vị trí
-> đối xứng. `tools/inspect_frames.py` có gate check riêng cho việc này.
+> đối xứng. `tools/compare_odometry_frames.py` kiểm tra riêng việc này, đối
+> chiếu frame ODOMETRY của ROS với ESP32 tag.
 
 
 
@@ -616,17 +617,17 @@ telemetry ngược lại trên cùng port, nếu không đọc thì buffer nhậ
 
 | Tool                             | Việc                                                                        |
 | -------------------------------- | --------------------------------------------------------------------------- |
-| `tools/inspect_frames.py`        | gate check frame: in message ODOMETRY sẽ gửi, kiểm tra frame id và khớp NED |
 | `tools/sitl_extnav_monitor.py`   | đọc/ghi param VISO + EK3, theo dõi `EKF_STATUS_REPORT`                      |
-| `tools/check_extnav_e2e.py`      | gửi ODOMETRY cố định, xác nhận EKF báo `is using external nav data`         |
-| `tools/check_extnav_tracking.py` | gửi ramp vị trí, xác nhận EKF bám theo                                      |
-| `tools/compare_positions.py`     | so sánh vị trí Gazebo / trilateration / EKF                                 |
-| `tools/verify_fdm_coupling.py`   | kiểm tra SITL thực sự điều khiển mô phỏng Gazebo                            |
-| `tools/run_pipeline_verify.sh`   | chạy cả ba gate trên trong một lần                                          |
+| `tools/compare_odometry_frames.py` | đối chiếu frame ODOMETRY giữa ROS và ESP32 tag                            |
+| `tools/check_ekf_heading.py`     | theo dõi heading qua `/mavros/vfr_hud`, phát hiện EKF bị ghim về Bắc         |
+| `tools/ab_test_yaw_source.py`    | đổi runtime `attitude_quaternion` + `EK3_SRC1_YAW`, đo heading               |
+| `tools/ab_run_all_cases.py`      | chạy trọn 4 case A/B của bài toán yaw                                       |
+| `tools/fake_ranging_source.py`   | nguồn ranging giả, để test tích hợp không cần Gazebo                       |
+| `tools/cleanup_stack.sh`         | dừng sạch toàn bộ process của stack x500                                    |
 
 
 ```bash
 # Kiểm tra nhanh không cần Gazebo
-python3 src/uwb_pozyx_bridge/tools/check_extnav_e2e.py
+python3 src/uwb_pozyx_bridge/tools/check_ekf_heading.py
 ```
 

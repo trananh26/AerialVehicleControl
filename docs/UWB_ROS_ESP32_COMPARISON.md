@@ -40,7 +40,7 @@ Cả hai đều là MAVLink 2 (magic `0xFD`), payload 233 byte (`MAVLINK_MSG_ID_
 CRC extra `91`, header 10 byte. Vì vậy **ArduPilot không thể phân biệt** bản tin nào
 từ bản tin nào ở tầng framing.
 
-Tuy nhiên **ngữ nghĩa các trường bên trong ban đầu không tương đương**. 7 điểm khác
+Tuy nhiên **ngữ nghĩa các trường bên trong ban đầu không tương đương**. 8 điểm khác
 biệt được liệt kê dưới đây, xếp theo mức độ nghiêm trọng.
 
 | # | Điểm khác biệt | Mức độ | Trạng thái sau khi sửa |
@@ -52,6 +52,7 @@ biệt được liệt kê dưới đây, xếp theo mức độ nghiêm trọng
 | 5 | Nghiệm Z (anchor đồng phẳng → 2 nghiệm đối xứng) | 🟠 trung bình | ✅ Cả 2 giải **3D chọn nhánh** theo nghiệm trước |
 | 6 | `estimator_type`: VIO (2) vs NAIVE (1) | 🟢 thấp | ✅ Cả 2 dùng `MAV_ESTIMATOR_TYPE_NAIVE` (1) |
 | 7 | `velocity_covariance[0]`: `NaN` vs `0.0` | 🟢 thấp | ✅ Cả 2 đặt `[0] = NaN` |
+| 8 | `q[4]`: identity `(1,0,0,0)` vs identity | 🔴 **cao** | ✅ Cả 2 gửi quaternion **toàn NaN** — xem mục 11.2 |
 
 ---
 
@@ -66,7 +67,7 @@ nhau ban đầu để đối chiếu.
 | `frame_id` (uint8) | `MAV_FRAME_LOCAL_FRD` (20) | `MAV_FRAME_LOCAL_FRD` (20) | ✅ | ✅ |
 | `child_frame_id` (uint8) | `MAV_FRAME_BODY_FRD` (12) | `MAV_FRAME_BODY_FRD` (12) | ✅ | ✅ |
 | `x, y, z` (float) | NED sau `convertLocalToNed()` | NED sau `AnchorLayout.to_ned_3d()` | ⚠️ mục 1 | ✅ |
-| `q[4]` (float) | identity `[1,0,0,0]` | identity `(1,0,0,0)` mặc định | ✅ | ✅ |
+| `q[4]` (float) | toàn `NaN` `[NAN,NAN,NAN,NAN]` | toàn `NaN` — `unknown_attitude_quaternion()` | ❌ mục 8 | ✅ |
 | `vx, vy, vz` (float) | **`NAN, NAN, NAN`** | **`NAN, NAN, NAN`** | ❌ mục 3 | ✅ |
 | `rollspeed, pitchspeed, yawspeed` | `0,0,0` | `0,0,0` | ✅ | ✅ |
 | `pose_covariance[21]` | `[0]=[6]=[11]=var(Q)` | `[0]=[6]=[11]=std²` | ✅ cùng layout | ✅ |
@@ -612,7 +613,7 @@ print(' '.join('%02X' % b for b in msg.pack(m)))
 
 | Bài kiểm tra | Kết quả |
 | :-- | :-- |
-| Unit test `uwb_pozyx_bridge` (61 test) | ✅ pass |
+| Unit test `uwb_pozyx_bridge` (80 test) | ✅ pass |
 | Host test `trilateration.cpp` (ESP32) | ✅ khớp số solver ROS |
 | `compare_odometry_frames.py` | ✅ frame giống nhau từng field |
 | `takeoff_land_mission` | ✅ leo 1.4 m, hạ cánh |
@@ -643,7 +644,99 @@ ros2 launch uwb_pozyx_bridge x500_uwb_runway.launch.py \
 
 ---
 
+## 11.2 Mục 8 — Quaternion: **NaN**, không phải identity (🔴 cao)
+
+Cả hai bên trước đây gửi quaternion **identity** `(1, 0, 0, 0)`. Điều này
+**tiêm yaw = 0 rad vào EKF3** — xem [M2] trong
+`esp32-uwb-localization/docs/CODE_REVIEW_FINDINGS.md`.
+
+### Cơ chế (đối chiếu source ArduPilot 4.6.3)
+
+`GCS_MAVLINK::handle_odometry()` truyền nguyên vẹn `q` xuống
+`AP_VisualOdom_MAV::handle_pose_estimate()`, và `NavEKF3_core::writeExtNavData()`:
+
+```1057:1107:src/ardupilot/libraries/AP_NavEKF3/AP_NavEKF3_Measurements.cpp
+void NavEKF3_core::writeExtNavData(const Vector3f &pos, const Quaternion &quat, float posErr, float angErr, uint32_t timeStamp_ms, uint16_t delay_ms, uint32_t resetTime_ms)
+{
+    ...
+    // store position data to buffer
+    storedExtNav.push(extNavDataNew);
+
+    // protect against attitude or angle being NaN
+    if (!quat.is_nan() && !isnan(angErr)) {
+        ftype roll_rad, pitch_rad, yaw_rad;
+        quat.to_euler(roll_rad, pitch_rad, yaw_rad);
+        yaw_elements extNavYawAngDataNew;
+        extNavYawAngDataNew.yawAng = yaw_rad;              // <-- yaw is taken
+        ...
+        storedExtNavYawAng.push(extNavYawAngDataNew);
+    }
+}
+```
+
+Với `EK3_SRCx_YAW = EXTNAV`, `AP_NavEKF3_MagFusion.cpp` sẽ
+`alignYawAngle()` (reset yaw EKF) rồi `fuseEulerYaw(EXTNAV)` liên tục.
+
+### Hệ quả đo được trong simulation SITL
+
+| case | quaternion | `EK3_SRC1_YAW` | heading đo được | kết luận |
+| :-- | :-- | :-- | :-- | :-- |
+| A | NaN | 6 (EXTNAV) | 92°–95° | không bị kéo về 0° |
+| **B** | **identity** | **6 (EXTNAV)** | **0.0° (138/138 mẫu)** | **ghim về Bắc — bug** |
+| C | NaN | 1 (Compass) | 90°–91° | bình thường |
+| D | identity | 1 (Compass) | 91° | bình thường |
+
+Bay thật với **case B**: `EKF3 IMU0/IMU1 yaw aligned` → `EKF3 lane switch 1` →
+vị trí nhảy `238148 m` → `647131944 m` → **ArduPilot crash** (`Floating point
+exception`).
+
+### Fix
+
+Cả hai bên gửi quaternion **toàn NaN**:
+
+```python
+# src/uwb_pozyx_bridge/uwb_pozyx_bridge/mavlink_odometry.py
+def unknown_attitude_quaternion() -> list[float]:
+    # Build the quaternion for "no attitude estimate".
+    return [float("nan")] * 4
+```
+
+`Quaternion::is_nan()` = true ⇒ **nhánh yaw bị bỏ qua**, còn **vị trí vẫn
+được hợp nhất bình thường** (`extNavDataNew.pos` được push độc lập).
+
+### Lưu ý vận hành
+
+Với `EK3_SRCx_YAW = EXTNAV` **và** quaternion NaN, EKF **không khởi tạo
+được** (`EKF_STATUS_REPORT.flags = 0x0`) vì không có nguồn yaw nào — ArduPilot
+báo `Arm: Need Position Estimate` và từ chối arm.
+
+⇒ **Bắt buộc `EK3_SRCx_YAW = 1` (Compass)** cho hệ thống UWB này. Quaternion
+NaN không làm hỏng compass — nó chỉ ngăn EKF hấp thụ một yaw mà hệ thống
+không biết.
+
+### Kiểm chứng
+
+| Bài kiểm tra | Kết quả |
+| :-- | :-- |
+| `test_ardupilot_odometry_model.py` (16 test) | ✅ pass — mô phỏng nguyên văn chuỗi ArduPilot |
+| `test_mavlink_odometry.py` (80 test cả package) | ✅ pass |
+| `takeoff_land_mission` (q = NaN, YAW = Compass) | ✅ leo 1.41 m, hạ cánh |
+| `circle_mission` (q = NaN, YAW = Compass) | ✅ vòng tròn đầy đủ; heading 5°–359°, **0/474 mẫu ở gần Bắc** |
+
+Công cụ dùng để verify:
+
+```bash
+# heading của EKF trong khi bay
+python3 src/uwb_pozyx_bridge/tools/check_ekf_heading.py --duration 120
+
+# A/B 4 case (đổi param runtime, không cần restart)
+python3 src/uwb_pozyx_bridge/tools/ab_run_all_cases.py --cases A,B,C,D
+```
+
+---
+
 ## 12. Tham chiếu
+
 
 ### ArduPilot (repo này, submodule `src/ardupilot`)
 

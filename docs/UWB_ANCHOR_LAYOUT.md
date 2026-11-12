@@ -521,6 +521,11 @@ ROS in ra (mỗi 200 lời giải):
 | Unit test layout | `src/uwb_pozyx_bridge/test/test_uwb_layout.py` |
 | Unit test world | `src/uwb_pozyx_bridge/test/test_uwb_world.py` |
 
+> **Lưu ý về tên package:** `uwb_pozyx_bridge` là tên cũ từ lúc thiết kế theo phương án
+> Pozyx. Package này dùng **MAVLink `ODOMETRY` (331) + EXTNAV**, **không** dùng protocol
+> Beacon/Pozyx của ArduPilot ⇒ **không áp dụng quy ước layout Pozyx** (N pattern, ID
+> thấp nhất ở gốc, `BCN_ORIENT_YAW`). Chi tiết đối chiếu: [`NOTES.md`](NOTES.md).
+
 ### ESP32 (`esp32-uwb-localization`)
 
 | Nội dung | Đường dẫn |
