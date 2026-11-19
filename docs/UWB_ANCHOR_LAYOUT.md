@@ -37,28 +37,70 @@ cho ra vị trí khác nhau.
 
 ```
 a0 = (0, 0, 0)        a1 = (X, 0, 0)      X = 10 m (mặc định)
-a3 = (0, Y, 0)        a2 = (X, Y, 0)      Y = 10 m (mặc định)
+a2 = (0, Y, 0)        a3 = (X, Y, 0)      Y = 10 m (mặc định)
 ```
 
-* `x` hướng về `a1`, `y` hướng về `a3`
+* `x` hướng về `a1`, `y` hướng về `a2`
 * `z` hướng **xuống** — mặt phẳng anchor là mặt phẳng `z = 0`, nên tag **dưới**
   mặt phẳng có `z` **dương**
 * Tâm của hình chữ nhật là `(X/2, Y/2)`
 
 > **Layout không bắt buộc là hình vuông.** Ở hiện trường anchor được lắp ở
-> chỗ có chỗ, nên cạnh `a0 → a1` và cạnh `a0 → a3` thường **không bằng nhau**.
+> chỗ có chỗ, nên cạnh `a0 → a1` và cạnh `a0 → a2` thường **không bằng nhau**.
 > Vì vậy layout được mô tả bằng **hai** số `X` và `Y`, và cả hai bên (ROS và
 > ESP32) đều lấy chúng từ cùng một cặp hằng số cấu hình.
 
-Sơ đồ Anchor Frame (nhìn từ trên xuống):
+### 2.1.1 N pattern
+
+Thứ tự ID của anchor đi theo **hình chữ N** — đúng quy ước của Pozyx
+reference implementation của ArduPilot
+(`Tools/Pozyx/IndoorLoiter/IndoorLoiter.ino`):
 
 ```
-        ↑ +x (hướng a0 → a1)
-   a3 (0,Y) ●─────────────● a2 (X,Y)
-            │             │
-            │   a0 ●─────┘
-            │     (0,0)
+uint16_t anchor_id[4] = { 0x601C, // (0,0)
+                          0x6020, // x-axis
+                          0x6057, // y-axis
+                          0x605E};
+int32_t anchors_x[4] = {0, 10000, 0,     10000};
+int32_t anchors_y[4] = {0, 0,     10000, 10000};
 ```
+
+> Anchor có **ID thấp nhất** là **gốc** (đặt ở góc "dưới-trái" của hình chữ
+> nhật). Ba anchor còn lại đặt ở ba góc còn lại, sao cho **ID tăng dần khi đi
+> theo hình chữ N** trong hình chữ nhật.
+
+Sơ đồ Anchor Frame (nhìn từ trên xuống, **Bắc lên trên — Đông sang phải**):
+
+```
+   a1 (X,0) ●───────────────● a3 (X,Y)
+        │                   │
+        │  ↑ +x = hướng     │  +y = hướng Đông
+        │    Bắc (a0 → a1)  │
+   a0 (0,0) ●───────────────● a2 (0,Y)
+```
+
+> Anchor Frame là hệ **NED-like**: `x = Bắc (North)`, `y = Đông (East)`, `z` hướng
+> **xuống**. Vì vậy `a1` nằm ở **phía Bắc** của `a0`, `a2` nằm ở **phía Đông**
+> của `a0`, còn `a3` là góc đối diện.
+>
+> Đi theo thứ tự ID `a0 → a1 → a2 → a3` ta đi **lên → chéo xuống-phải → lên**,
+> đúng là **hình chữ N**. Đây cũng chính là lý do ArduPilot đặt anchor có ID
+> thấp nhất ở góc "dưới-trái" (tức `a0`).
+>
+> ⚠️ **Anchor Frame ≠ Gazebo World Frame.** World của Gazebo là **ENU**
+> (`x = Đông`, `y = Bắc`, `z = lên`), tức là **hai trục ngang bị hoán đổi**. Xem
+> [mục 5.2](#52-quy-tắc-chuyển-đổi-tổng-quát-anchor-frame--ned--enu).
+
+> ### ⚠️ N pattern ≠ thứ tự vòng kim
+>
+> Thứ tự **vòng kim** (`a0 → a1 → a3 → a2`) là layout mà project dùng **trước
+> đây**. N pattern **hoán đổi hai anchor cuối**: `a2` nằm ở đầu cạnh
+> `a0 → a2` (tức `(0, Y)`), còn `a3` nằm ở góc đối diện `(X, Y)`.
+>
+> Vì **MAVLink `ODOMETRY` không chứa thông tin anchor** (ArduPilot không biết
+> có bao nhiêu anchor, anchor ở đâu, ID thứ tự ra sao), nên việc đổi từ vòng
+> kim sang N pattern là **thuần tuý thay đổi quy ước nội bộ của hai bên** —
+> pipeline MAVLink và EKF **không đổi một byte nào**.
 
 ### 2.2 Vì sao solver luôn dùng hình chữ nhật lý tưởng
 
@@ -151,19 +193,19 @@ File `src/uwb_gz_plugin/worlds/uwb_runway.sdf` là **template**; vị trí ancho
 ```
       <anchor name="uwb_anchor0"><pos>0 0 2.0</pos></anchor>
       <anchor name="uwb_anchor1"><pos>0 10 2.0</pos></anchor>
-      <anchor name="uwb_anchor2"><pos>10 10 2.0</pos></anchor>
-      <anchor name="uwb_anchor3"><pos>10 0 2.0</pos></anchor>
+      <anchor name="uwb_anchor2"><pos>10 0 2.0</pos></anchor>
+      <anchor name="uwb_anchor3"><pos>10 10 2.0</pos></anchor>
 ```
 
 Vuông **10 × 10 m** trên mặt phẳng `z = 2.0 m`. ID 0..3 gán theo thứ tự khai
 báo trong SDF (`a.id = static_cast<int>(anchors_.size())`).
 
 Với $\alpha = 0$ (mặc định), Anchor Frame trùng NED ⇒ world ENU của anchor là
-`(E, N, U) = (0,0,2) (0,10,2) (10,10,2) (10,0,2)` — tức **thứ tự ID đi vòng
-ngược chiều kim đồng hồ** khi nhìn từ trên xuống.
+`(E, N, U) = (0,0,2) (0,10,2) (10,0,2) (10,10,2)` — tức **thứ tự ID đi theo hình
+chữ N** khi nhìn từ trên xuống.
 
 Khi layout là hình chữ nhật (ví dụ `X = 14 m`, `Y = 7 m`), world ENU trở thành
-`(0,0,2) (0,14,2) (7,14,2) (7,0,2)` — vẫn giữ nguyên thứ tự ID.
+`(0,0,2) (0,14,2) (7,0,2) (7,14,2)` — vẫn giữ nguyên thứ tự ID.
 
 ### 3.2 Nguồn sự thật duy nhất
 
@@ -203,7 +245,7 @@ Các hàm chính:
 | Tham số launch | Tham số node | Mặc định | Ý nghĩa |
 | :-- | :-- | :-- | :-- |
 | `layout_size_x_m` | `layout_size_x_m` | `10.0` | Cạnh `a0 → a1` (Anchor Frame), mét |
-| `layout_size_y_m` | `layout_size_y_m` | `10.0` | Cạnh `a0 → a3` (Anchor Frame), mét |
+| `layout_size_y_m` | `layout_size_y_m` | `10.0` | Cạnh `a0 → a2` (Anchor Frame), mét |
 | `layout_alpha_deg` | `layout_alpha_deg` | `0.0` | Bearing của `a0 → a1` đo từ Bắc, độ |
 | — | `anchor_plane_height_m` | `2.0` | Cao của mặt phẳng anchor so với mặt đất, mét |
 
@@ -251,7 +293,7 @@ Mặc định được dựng từ **hai** hằng số trong
 
 ```c
 #define CFG_DEFAULT_LAYOUT_SIZE_X_M 10.0f   // cạnh a0 → a1
-#define CFG_DEFAULT_LAYOUT_SIZE_Y_M 10.0f   // cạnh a0 → a3
+#define CFG_DEFAULT_LAYOUT_SIZE_Y_M 10.0f   // cạnh a0 → a2
 #define CFG_DEFAULT_YAW_OFFSET_DEG     0.0f
 #define CFG_DEFAULT_ANCHOR_PLANE_HEIGHT_M 2.0f
 ```
@@ -260,10 +302,10 @@ và được đưa vào mảng runtime trong `tag_config.cpp`:
 
 ```cpp
 const float CFG_DEFAULT_ANCHOR_POS[CFG_NUM_ANCHORS][3] = {
-    {0.0f,                        0.0f, 0.0f},   // a0
+    {0.0f, 0.0f, 0.0f},   // a0 — gốc
     {CFG_DEFAULT_LAYOUT_SIZE_X_M, 0.0f, 0.0f},   // a1
-    {CFG_DEFAULT_LAYOUT_SIZE_X_M, CFG_DEFAULT_LAYOUT_SIZE_Y_M, 0.0f},  // a2
-    {0.0f, CFG_DEFAULT_LAYOUT_SIZE_Y_M, 0.0f},   // a3
+    {0.0f, CFG_DEFAULT_LAYOUT_SIZE_Y_M, 0.0f},   // a2
+    {CFG_DEFAULT_LAYOUT_SIZE_X_M, CFG_DEFAULT_LAYOUT_SIZE_Y_M, 0.0f},   // a3
 };
 ```
 
@@ -279,8 +321,8 @@ const uint8_t ANCHOR_IDS[NUM_ANCHORS] = {1, 2, 3, 4};
 | :-- | :-- | :-- | :-- |
 | 0 | 1 | `pio run -e anchor1` | `a0 = (0,0)` |
 | 1 | 2 | `pio run -e anchor2` | `a1 = (X,0)` |
-| 2 | 3 | `pio run -e anchor3` | `a2 = (X,Y)` |
-| 3 | 4 | `pio run -e anchor4` | `a3 = (0,Y)` |
+| 2 | 3 | `pio run -e anchor3` | `a2 = (0,Y)` |
+| 3 | 4 | `pio run -e anchor4` | `a3 = (X,Y)` |
 
 > **Khác biệt ID so với ROS:** ROS dùng **id 0..3**, ESP32 dùng **id 1..4**.
 > Khi chuyển đổi layout, phải trừ 1. Xem §5.4.
@@ -294,7 +336,7 @@ cfg,x1,y1,z1,x2,y2,z2,x3,y3,z3,x4,y4,z4,yaw[,plane_height]
 Ví dụ cho layout 10×10 m đồng phẳng, xoay 20° so với Bắc, mặt phẳng cao 2 m:
 
 ```
-cfg,0,0,0,10,0,0,10,10,0,0,10,0,20,2
+cfg,0,0,0,10,0,0,0,10,0,10,10,0,20,2
 ```
 
 Đây là 12 toạ độ + yaw = 13 giá trị (bắt buộc), `plane_height` là giá trị thứ 14
@@ -303,7 +345,7 @@ cfg,0,0,0,10,0,0,10,10,0,0,10,0,20,2
 Ví dụ cho layout **hình chữ nhật** 14 m × 7 m, xoay 20°:
 
 ```
-cfg,0,0,0,14,0,0,14,7,0,0,7,0,20,2
+cfg,0,0,0,14,0,0,0,7,0,14,7,0,20,2
 ```
 
 > Lệnh serial nhận **toạ độ tuyệt đối** của từng anchor, nên nó đã hỗ trợ
@@ -313,26 +355,26 @@ cfg,0,0,0,14,0,0,14,7,0,0,7,0,20,2
 
 ### 4.4 Kiểm chứng bằng phép thế chéo
 
-Bạn đặt câu hỏi: *"đứng ở anchor0 nhìn về anchor3 thì anchor1 ở bên tay trái,
-anchor2 ở góc còn lại (góc xa so với anchor0)"*. Với layout 10×10:
+Bạn đặt câu hỏi: *"đứng ở anchor0 nhìn về anchor2 thì anchor1 ở bên tay trái,
+anchor3 ở góc còn lại (góc xa so với anchor0)"*. Với layout 10×10:
 
 ```
-a0(0,0,0)  a1(10,0,0)  a2(10,10,0)  a3(0,10,0)
+a0(0,0,0)  a1(10,0,0)  a2(0,10,0)  a3(10,10,0)
 ```
 
 Đọc layout như NED (`x = North`, `y = East`):
 
 ```
-  ESP32: dung a0->a3 = huong 90 (Dong)
+  ESP32: dung a0->a2 = huong 90 (Dong)
      a1: huong tu a0 =   0.0 deg, TRAI so voi huong nhin, dist a0->a1 = 10.00 m
-     a2: huong tu a0 =  45.0 deg, TRAI so voi huong nhin, dist a0->a2 = 14.14 m
+     a3: huong tu a0 =  45.0 deg, TRAI so voi huong nhin, dist a0->a3 = 14.14 m
 ```
 
 Đối chiếu:
 
-- Đứng ở `a0`, nhìn về `a3` ⇒ hướng **Đông** (bearing 90°). ✅
+- Đứng ở `a0`, nhìn về `a2` ⇒ hướng **Đông** (bearing 90°). ✅
 - `a1` nằm ở hướng **Bắc** (bearing 0°) từ `a0` ⇒ lệch **90° sang TRÁI**. ✅
-- `a2` nằm ở hướng **Đông-Bắc** (bearing 45°) ⇒ lệch 45° sang trái, và là
+- `a3` nằm ở hướng **Đông-Bắc** (bearing 45°) ⇒ lệch 45° sang trái, và là
   góc **xa nhất** (14.14 m = 10√2). ✅
 
 ⇒ **Layout 10×10 khớp chính xác với mô tả.**
@@ -354,12 +396,13 @@ ESP32 phải trỏ đúng `a0` thì mới khớp vị trí thực tế.
 
 ### 5.1 Cùng một hình học, hai cách diễn đạt
 
-Với cạnh `X` (a0→a1), cạnh `Y` (a0→a3) và mặt phẳng cao `h` so với mặt đất:
+Với cạnh `X` (a0→a1), cạnh `Y` (a0→a2) và mặt phẳng cao `h` so với mặt đất,
+theo **N pattern**:
 
 **ROS** (Anchor Frame):
 
 ```python
-(0, 0, 0), (X, 0, 0), (X, Y, 0), (0, Y, 0)   # z = 0 nghĩa là nằm trên mặt phẳng anchor
+(0, 0, 0), (X, 0, 0), (0, Y, 0), (X, Y, 0)   # z = 0 nghĩa là nằm trên mặt phẳng anchor
 ```
 
 **ESP32** (Anchor Frame):
@@ -367,8 +410,8 @@ Với cạnh `X` (a0→a1), cạnh `Y` (a0→a3) và mặt phẳng cao `h` so v�
 ```cpp
 ANCHOR_POS_LOCAL[0] = { 0.0f, 0.0f, 0.0f};   // a0
 ANCHOR_POS_LOCAL[1] = {   X, 0.0f, 0.0f};   // a1
-ANCHOR_POS_LOCAL[2] = {   X,   Y, 0.0f};   // a2
-ANCHOR_POS_LOCAL[3] = {0.0f,   Y, 0.0f};   // a3
+ANCHOR_POS_LOCAL[2] = {0.0f,   Y, 0.0f};   // a2
+ANCHOR_POS_LOCAL[3] = {   X,   Y, 0.0f};   // a3
 ```
 
 ⇒ **Hai bên giờ dùng *cùng một bộ số*.** Đây là điểm mấu chốt của việc đồng bộ.
@@ -386,14 +429,14 @@ E_enu = E,  N_enu = N,  U_enu = h − z
 
 ### 5.3 Ví dụ: layout với α = 20°
 
-Anchor Frame: `a0(0,0)`, `a1(10,0)`, `a2(10,10)`, `a3(0,10)`.
+Anchor Frame: `a0(0,0)`, `a1(10,0)`, `a2(0,10)`, `a3(10,10)`.
 
 | Anchor | Anchor Frame | NED (α = 20°) | Gazebo ENU (α = 20°) |
 | :-- | :-- | :-- | :-- |
 | `a0` | (0, 0) | (0.00, 0.00) | (0.00, 0.00, 2.00) |
 | `a1` | (10, 0) | (9.40, 3.42) | (3.42, 9.40, 2.00) |
-| `a2` | (10, 10) | (5.79, 12.26) | (12.26, 5.79, 2.00) |
-| `a3` | (0, 10) | (−3.42, 9.40) | (9.40, −3.42, 2.00) |
+| `a2` | (0, 10) | (−3.42, 9.40) | (9.40, −3.42, 2.00) |
+| `a3` | (10, 10) | (5.98, 12.82) | (12.82, 5.98, 2.00) |
 
 ### 5.3.1 Ví dụ: layout **chữ nhật** 14 m × 7 m, α = 0°
 
@@ -401,8 +444,8 @@ Anchor Frame: `a0(0,0)`, `a1(10,0)`, `a2(10,10)`, `a3(0,10)`.
 | :-- | :-- | :-- | :-- |
 | `a0` | (0, 0) | (0.00, 0.00) | (0.00, 0.00, 2.00) |
 | `a1` | (14, 0) | (14.00, 0.00) | (0.00, 14.00, 2.00) |
-| `a2` | (14, 7) | (14.00, 7.00) | (7.00, 14.00, 2.00) |
-| `a3` | (0, 7) | (0.00, 7.00) | (7.00, 0.00, 2.00) |
+| `a2` | (0, 7) | (0.00, 7.00) | (7.00, 0.00, 2.00) |
+| `a3` | (14, 7) | (14.00, 7.00) | (7.00, 14.00, 2.00) |
 
 ### 5.4 Bảng ánh xạ ID vật lý (dùng chung một bộ anchor cho cả 2 bên)
 
@@ -413,8 +456,8 @@ dán nhãn vật lý lên board:
 | :-- | :-- | :-- | :-- |
 | `anchor1` | `a0` (0,0) | `[0]` | id 0 |
 | `anchor2` | `a1` (X,0) | `[1]` | id 1 |
-| `anchor3` | `a2` (X,Y) | `[2]` | id 2 |
-| `anchor4` | `a3` (0,Y) | `[3]` | id 3 |
+| `anchor3` | `a2` (0,Y) | `[2]` | id 2 |
+| `anchor4` | `a3` (X,Y) | `[3]` | id 3 |
 
 ⇒ **Thứ tự ID đã khớp 1-1** giữa hai bên (ESP32 id = ROS id + 1). Không cần
 đảo `ANCHOR_IDS` nữa.
@@ -477,7 +520,7 @@ ROS in ra (mỗi 200 lời giải):
       **bằng nhau**
 - [ ] `config_anchor_plane_height_m` (ESP32) và `plane_height_m` (ROS) đã hiệu
       chỉnh và **bằng nhau**
-- [ ] **Cạnh `X` (a0→a1) và `Y` (a0→a3) của ROS khớp với toạ độ anchor thật
+- [ ] **Cạnh `X` (a0→a1) và `Y` (a0→a2) của ROS khớp với toạ độ anchor thật
       của ESP32** — đặc biệt khi layout không phải hình vuông
 - [ ] Dấu `z` nhất quán (frame Z-Down ⇒ tag dưới mặt phẳng anchor ⇒ `z` dương)
 - [ ] Gốc toạ độ (`a0`) **giống nhau** giữa layout và
@@ -495,11 +538,11 @@ ROS in ra (mỗi 200 lời giải):
 
 | Câu hỏi | Trả lời |
 | :-- | :-- |
-| Layout ROS hiện tại ở đâu? | World ENU: `(0,0,2) (0,10,2) (10,10,2) (10,0,2)`; Anchor Frame `a0(0,0,0) a1(X,0,0) a2(X,Y,0) a3(0,Y,0)`; gốc EKF = `a0`; α = 0 |
+| Layout ROS hiện tại ở đâu? | World ENU: `(0,0,2) (0,10,2) (10,0,2) (10,10,2)`; Anchor Frame `a0(0,0,0) a1(X,0,0) a2(0,Y,0) a3(X,Y,0)` (**N pattern**); gốc EKF = `a0`; α = 0 |
 | Layout ESP32 của bạn đã đúng NED chưa? | **Đúng** — Anchor Frame `x = North-ish`, `y = East-ish`, `z = Down`, và giờ **trùng khớp ROS** |
-| *"Đứng ở a0 nhìn về a3 thì a1 ở bên trái, a2 ở góc xa"* — đúng không? | **Đúng** — verify bằng script: hướng nhìn a0→a3 = Đông (90°), a1 ở bearing 0° (Bắc) ⇒ lệch 90° **trái**; a2 ở bearing 45°, khoảng cách 14.14 m = góc xa nhất |
+| *"Đứng ở a0 nhìn về a2 thì a1 ở bên trái, a3 ở góc xa"* — đúng không? | **Đúng** — verify bằng script: hướng nhìn a0→a2 = Đông (90°), a1 ở bearing 0° (Bắc) ⇒ lệch 90° **trái**; a3 ở bearing 45°, khoảng cách 14.14 m = góc xa nhất |
 | Layout ESP32 có trùng layout ROS không? | **Có, tuyệt đối** — cùng Anchor Frame, cùng thứ tự ID (ESP32 id = ROS id + 1), cùng α, cùng chiều cao mặt phẳng |
-| Layout có cần là hình vuông không? | **Không** — cả hai bên đều dùng **hình chữ nhật** `X × Y`. ROS: `layout_size_x_m` / `layout_size_y_m`; ESP32: `CFG_DEFAULT_LAYOUT_SIZE_X_M` / `CFG_DEFAULT_LAYOUT_SIZE_Y_M` (hoặc toạ độ tuyệt đối qua lệnh `cfg`) |
+| Layout có cần là hình vuông không? | **Không** — cả hai bên đều dùng **hình chữ nhật** `X × Y`. Thứ tự ID đi theo **N pattern** (Pozyx). ROS: `layout_size_x_m` / `layout_size_y_m`; ESP32: `CFG_DEFAULT_LAYOUT_SIZE_X_M` / `CFG_DEFAULT_LAYOUT_SIZE_Y_M` (hoặc toạ độ tuyệt đối qua lệnh `cfg`) |
 | Góc lệch `alpha` xử lý thế nào? | **Đặt `config_yaw_offset_deg = alpha`** (ESP32) và `alpha_deg = alpha` (ROS). Dấu theo bearing của hướng `a0→a1` đo từ Bắc |
 | Còn gì phải sửa? | ✅ **Không còn gì** — 7/7 mục đã đồng bộ. Xem [`UWB_ROS_ESP32_COMPARISON.md`](UWB_ROS_ESP32_COMPARISON.md) |
 
@@ -523,8 +566,13 @@ ROS in ra (mỗi 200 lời giải):
 
 > **Lưu ý về tên package:** `uwb_pozyx_bridge` là tên cũ từ lúc thiết kế theo phương án
 > Pozyx. Package này dùng **MAVLink `ODOMETRY` (331) + EXTNAV**, **không** dùng protocol
-> Beacon/Pozyx của ArduPilot ⇒ **không áp dụng quy ước layout Pozyx** (N pattern, ID
-> thấp nhất ở gốc, `BCN_ORIENT_YAW`). Chi tiết đối chiếu: [`NOTES.md`](NOTES.md).
+> Beacon/Pozyx của ArduPilot ⇒ `BCN_ORIENT_YAW` **không** được dùng; góc lệch
+> layout do **hai bên tự xoay** (`alpha_deg` / `config_yaw_offset_deg`).
+>
+> Tuy vậy, project **chọn dùng N pattern** cho thứ tự ID anchor để **thống nhất
+> với Pozyx reference implementation** — đây là quy ước **nội bộ giữa hai bên**,
+> hoàn toàn độc lập với việc ArduPilot có biết anchor hay không. Chi tiết đối
+> chiếu: [`NOTES.md`](NOTES.md).
 
 ### ESP32 (`esp32-uwb-localization`)
 

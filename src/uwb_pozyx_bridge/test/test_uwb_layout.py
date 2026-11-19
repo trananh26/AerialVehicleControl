@@ -3,6 +3,10 @@
 The layout is the single source of truth shared by the ROS simulation and
 the ESP32 tag: the ideal rectangle in the anchor frame, the rotation by
 ``alpha`` relative to NED, and the conversion into the Gazebo world frame.
+
+The anchor ids walk the **N pattern** of the Pozyx reference implementation
+of ArduPilot (``IndoorLoiter.ino``): the lowest id is the origin, and the
+ids increase as you travel an "N" through the rectangle.
 """
 
 import math
@@ -13,17 +17,22 @@ from uwb_pozyx_bridge.uwb_layout import (
     ANCHOR_COUNT,
     LAYOUT_SIZE_X_M,
     LAYOUT_SIZE_Y_M,
+    N_PATTERN_INDEX_ORDER,
     AnchorLayout,
     default_layout,
     rotate_ned,
 )
 
 
-def test_anchor_frame_is_the_ideal_rectangle():
+def test_anchor_frame_is_the_ideal_rectangle_in_the_n_pattern():
     """The anchor frame is a rectangle with a0 at the origin.
 
-    ``x`` points towards ``a1`` and ``y`` towards ``a3``; ``z`` points
+    The ids walk the N pattern of the Pozyx reference implementation:
+    ``x`` points towards ``a1`` and ``y`` towards ``a2``; ``z`` points
     down, so the anchor plane is ``z = 0``.
+
+    Note that ``a2`` is at ``(0, Y)`` and ``a3`` at ``(X, Y)`` — that is
+    the N pattern, not the perimeter order.
     """
     layout = default_layout()
     positions = layout.anchor_frame_positions()
@@ -31,8 +40,69 @@ def test_anchor_frame_is_the_ideal_rectangle():
     assert len(positions) == ANCHOR_COUNT
     assert positions[0] == (0.0, 0.0, 0.0)
     assert positions[1] == (LAYOUT_SIZE_X_M, 0.0, 0.0)
-    assert positions[2] == (LAYOUT_SIZE_X_M, LAYOUT_SIZE_Y_M, 0.0)
-    assert positions[3] == (0.0, LAYOUT_SIZE_Y_M, 0.0)
+    assert positions[2] == (0.0, LAYOUT_SIZE_Y_M, 0.0)
+    assert positions[3] == (LAYOUT_SIZE_X_M, LAYOUT_SIZE_Y_M, 0.0)
+
+
+def test_the_layout_reads_as_a_map_with_north_up():
+    """The anchor frame is NED-like: x = North, y = East.
+
+    Drawn as a map with North up and East right, the four anchors are::
+
+        a1 ------- a3
+         |         |
+         |         |
+        a0 ------- a2
+
+    so a1 is at the NORTH end of a0, a2 at its EAST end and a3 is the
+    opposite corner.
+    """
+    layout = AnchorLayout(size_x_m=10.0, size_y_m=6.0)
+    positions = layout.anchor_frame_positions()
+
+    a0, a1, a2, a3 = positions
+
+    # a0 is the origin (south-west corner of the map).
+    assert a0 == (0.0, 0.0, 0.0)
+
+    # a1 is due North of a0: same East, more North.
+    assert a1[0] == 10.0 and a1[1] == 0.0
+
+    # a2 is due East of a0: same North, more East.
+    assert a2[0] == 0.0 and a2[1] == 6.0
+
+    # a3 is the opposite corner: North of a2, East of a1.
+    assert a3 == (10.0, 6.0, 0.0)
+
+
+def test_the_anchor_ids_walk_the_n_pattern():
+    """Walking the ids in order traces the letter N."""
+    layout = AnchorLayout(size_x_m=10.0, size_y_m=6.0)
+    positions = layout.anchor_frame_positions()
+
+    # The N is walked in the order of the anchor ids.
+    assert N_PATTERN_INDEX_ORDER == (0, 1, 2, 3)
+
+    # Step 1: a0 -> a1 goes up the a0->a1 side (North, the "x" direction).
+    assert positions[1][0] > positions[0][0]
+    assert positions[1][1] == positions[0][1]
+
+    # Step 2: a1 -> a2 crosses diagonally down-right to the a0->a2 side
+    # (East, the "y" direction).
+    assert positions[2][1] > positions[1][1]
+    assert positions[2][0] == positions[0][0]
+
+    # Step 3: a2 -> a3 goes back up the far side.
+    assert positions[3][0] > positions[2][0]
+    assert positions[3][1] == positions[2][1]
+
+
+def test_the_lowest_id_is_the_origin():
+    """The lowest anchor id sits at the origin of the anchor frame."""
+    layout = AnchorLayout(size_x_m=14.0, size_y_m=7.0, alpha_deg=33.0)
+    positions = layout.anchor_frame_positions()
+
+    assert positions[0] == (0.0, 0.0, 0.0)
 
 
 def test_the_layout_can_be_a_rectangle():
@@ -41,8 +111,8 @@ def test_the_layout_can_be_a_rectangle():
     positions = layout.anchor_frame_positions()
 
     assert positions[1] == (14.0, 0.0, 0.0)
-    assert positions[2] == (14.0, 7.0, 0.0)
-    assert positions[3] == (0.0, 7.0, 0.0)
+    assert positions[2] == (0.0, 7.0, 0.0)
+    assert positions[3] == (14.0, 7.0, 0.0)
     assert not layout.is_square
 
 
@@ -58,8 +128,8 @@ def test_alpha_zero_leaves_the_layout_aligned_with_ned():
 
     assert ned[0] == (0.0, 0.0, 0.0)
     assert ned[1] == (10.0, 0.0, 0.0)
-    assert ned[2] == (10.0, 10.0, 0.0)
-    assert ned[3] == (0.0, 10.0, 0.0)
+    assert ned[2] == (0.0, 10.0, 0.0)
+    assert ned[3] == (10.0, 10.0, 0.0)
 
 
 def test_alpha_rotates_the_layout_counter_clockwise_towards_the_east():
@@ -70,9 +140,9 @@ def test_alpha_rotates_the_layout_counter_clockwise_towards_the_east():
     # At 90 degrees the direction a0 -> a1 points East.
     assert ned[1][0] == pytest.approx(0.0, abs=1e-9)
     assert ned[1][1] == pytest.approx(10.0, abs=1e-9)
-    # ...and a0 -> a3 points South.
-    assert ned[3][0] == pytest.approx(-10.0, abs=1e-9)
-    assert ned[3][1] == pytest.approx(0.0, abs=1e-9)
+    # ...and a0 -> a2 points South.
+    assert ned[2][0] == pytest.approx(-10.0, abs=1e-9)
+    assert ned[2][1] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_rotation_preserves_the_layout_shape():
@@ -97,9 +167,9 @@ def test_rotate_ned_is_a_pure_rotation():
     assert north == pytest.approx(math.cos(math.radians(30.0)))
     assert east == pytest.approx(math.sin(math.radians(30.0)))
 
-    # The a0 -> a3 direction stays perpendicular to a0 -> a1.
-    north3, east3 = rotate_ned(0.0, 1.0, math.radians(30.0))
-    assert north * north3 + east * east3 == pytest.approx(0.0, abs=1e-9)
+    # The a0 -> a2 direction stays perpendicular to a0 -> a1.
+    north2, east2 = rotate_ned(0.0, 1.0, math.radians(30.0))
+    assert north * north2 + east * east2 == pytest.approx(0.0, abs=1e-9)
 
 
 def test_world_positions_are_the_ned_positions_in_enu_ordering():
@@ -111,8 +181,8 @@ def test_world_positions_are_the_ned_positions_in_enu_ordering():
 
     assert world[0] == (0.0, 0.0, 2.0)
     assert world[1] == (0.0, 10.0, 2.0)
-    assert world[2] == (10.0, 10.0, 2.0)
-    assert world[3] == (10.0, 0.0, 2.0)
+    assert world[2] == (10.0, 0.0, 2.0)
+    assert world[3] == (10.0, 10.0, 2.0)
 
 
 def test_world_positions_of_a_rectangle():
@@ -124,8 +194,8 @@ def test_world_positions_of_a_rectangle():
 
     assert world[0] == (0.0, 0.0, 2.0)
     assert world[1] == (0.0, 14.0, 2.0)
-    assert world[2] == (7.0, 14.0, 2.0)
-    assert world[3] == (7.0, 0.0, 2.0)
+    assert world[2] == (7.0, 0.0, 2.0)
+    assert world[3] == (7.0, 14.0, 2.0)
 
 
 def test_to_ned_applies_the_rotation_and_the_origin_offset():

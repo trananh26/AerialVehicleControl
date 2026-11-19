@@ -148,7 +148,7 @@ def layout_alpha_from_offsets(
     """
     if len(offsets) < 4:
         raise ValueError("four anchor positions are needed")
-    # a0 -> a1 is the +x direction of the anchor frame, a0 -> a3 is +y.
+    # a0 -> a1 is the +x direction of the anchor frame, a0 -> a2 is +y.
     dx = offsets[1][0] - offsets[0][0]
     dy = offsets[1][1] - offsets[0][1]
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:

@@ -121,7 +121,7 @@ Clone workspace và tất cả submodules:
 
 ```bash
 # Clone workspace + all submodules (1 lệnh duy nhất)
-git clone --recurse-submodules -b x500_model \
+git clone --recurse-submodules -b feat/uwb-odometry-n-pattern \
   https://github.com/trananh26/AerialVehicleControl.git ~/AerialVehicleControl
 
 # Nếu đã clone mà quên --recurse-submodules:
@@ -153,7 +153,7 @@ source /opt/ros/humble/setup.bash
 rosdep update
 rosdep install --from-paths src --ignore-src -r -y
 
-colcon build --packages-up-to ardupilot_gz_bringup drone_control
+colcon build --packages-up-to ardupilot_gz_bringup drone_control uwb_pozyx_bridge
 ```
 
 Source workspace:
@@ -167,6 +167,19 @@ source ~/AerialVehicleControl/install/setup.bash
 ```bash
 ros2 launch ardupilot_gz_bringup x500_runway.launch.py
 ```
+
+> **Pipeline UWB đầy đủ** (gazebo plugin + bridge + MAVLink ODOMETRY → ArduPilot)
+> dùng launch riêng, sinh world SDF động theo layout:
+>
+> ```bash
+> ros2 launch uwb_pozyx_bridge x500_uwb_runway.launch.py \
+>     layout_size_x_m:=10.0 \
+>     layout_size_y_m:=10.0 \
+>     layout_alpha_deg:=0.0
+> ```
+>
+> Xem [`docs/UWB_ARCHITECTURE.md`](docs/UWB_ARCHITECTURE.md) và
+> [`docs/UWB_ANCHOR_LAYOUT.md`](docs/UWB_ANCHOR_LAYOUT.md).
 
 ## 10. Run `drone_control` circle mission
 

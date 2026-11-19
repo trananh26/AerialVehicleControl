@@ -5,8 +5,7 @@ ArduPilot SITL, gồm các topic, frame, đơn vị và các bước xử lý tr
 
 > **Thay đổi so với bản cũ:** vị trí được gửi sang ArduPilot bằng MAVLink
 > `ODOMETRY` (id 331) thay vì protocol Pozyx (`AP_Beacon`). Toàn bộ tài liệu
-> dưới đây mô tả pipeline mới. Xem `UWB_POZYX_PIPELINE.md` cho lịch sử
-> pipeline cũ.
+> dưới đây mô tả pipeline mới.
 
 ## 1. Tổng quan
 
@@ -15,7 +14,7 @@ ArduPilot SITL, gồm các topic, frame, đơn vị và các bước xử lý tr
 │ Gazebo — uwb_runway.sdf                                                    │
     <plugin filename="uwb_gz_plugin" name="uwb_gz_plugin::systems::UwbSystem">│
 │     update_rate = 20 Hz, tag_model_name = x500, tag_link = base_link      │
-│     anchors (ENU, m): (0,0,2) (0,10,2) (10,10,2) (10,0,2)                │
+│     anchors (ENU, m): (0,0,2) (0,10,2) (10,0,2) (10,10,2)                │
 │     (sinh động theo layout: X×Y, xoay α)                                  │
 └───────────────────────────────┬────────────────────────────────────────────┘
                                 │ PostUpdate() mỗi 1/20 s
@@ -101,8 +100,8 @@ Gazebo, xem `uwb_pozyx_bridge/uwb_world.py::render_world`. Ở layout mặc đ�
   <los_std>0.05</los_std>
   <anchor name="uwb_anchor0"><pos>0 0 2.0</pos></anchor>
   <anchor name="uwb_anchor1"><pos>0 10 2.0</pos></anchor>
-  <anchor name="uwb_anchor2"><pos>10 10 2.0</pos></anchor>
-  <anchor name="uwb_anchor3"><pos>10 0 2.0</pos></anchor>
+  <anchor name="uwb_anchor2"><pos>10 0 2.0</pos></anchor>
+  <anchor name="uwb_anchor3"><pos>10 10 2.0</pos></anchor>
 </plugin>
 ```
 
@@ -199,7 +198,7 @@ Node Python nhận ranging, giải vị trí, đóng gói MAVLink `ODOMETRY`, g�
 | `send_rate`                                   | `20.0`                   | nhịp gửi message (Hz)                      |
 | `anchor_count`                                | `4`                      | số anchor                                  |
 | `layout_size_x_m`                             | `10.0`                   | cạnh `a0 → a1` của layout (Anchor Frame), m  |
-| `layout_size_y_m`                             | `10.0`                   | cạnh `a0 → a3` của layout (Anchor Frame), m  |
+| `layout_size_y_m`                             | `10.0`                   | cạnh `a0 → a2` của layout (Anchor Frame), m  |
 | `layout_alpha_deg`                            | `0.0`                    | góc lệch α của layout so với NED (°)        |
 | `anchor_plane_height_m`                       | `2.0`                    | chiều cao mặt phẳng anchor so với mặt đất, m |
 | `position_std_m`                              | `0.05`                   | **độ lệch chuẩn** của estimate vị trí, mét |
@@ -330,7 +329,7 @@ velPosObs[4] = extNavDataDelayed.pos.y;   // East
 Vì vậy position phải mang **NED**: `x` = North, `y` = East, `z` = Down.
 
 Gazebo world là ENU (x East, y North, z Up), còn solver giải trong **Anchor
-Frame** (`x` hướng `a1`, `y` hướng `a3`, `z` hướng xuống). Việc chuyển frame
+Frame** (`x` hướng `a1`, `y` hướng `a2`, `z` hướng xuống). Việc chuyển frame
 được gom vào `uwb_layout.py`:
 
 ```python

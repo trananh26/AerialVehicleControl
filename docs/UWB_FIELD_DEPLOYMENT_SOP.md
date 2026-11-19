@@ -83,13 +83,14 @@ git submodule update --init --recursive   # nếu clone không kèm submodule
 
 ```bash
 cd ~/
-git clone --recurse-submodules -b x500_model \
+git clone --recurse-submodules -b feat/uwb-odometry-n-pattern \
   https://github.com/trananh26/AerialVehicleControl.git
 cd AerialVehicleControl
 git submodule update --init --recursive
 ```
 
-> Nhánh `x500_model` là nhánh chứa pipeline UWB + ArduPilot SITL.
+> Nhánh `feat/uwb-odometry-n-pattern` là nhánh chứa pipeline UWB + ArduPilot
+> SITL (`src/uwb_pozyx_bridge`, `src/uwb_gz_plugin`).
 
 ### 2.3 Cài PlatformIO (Ubuntu)
 
@@ -156,18 +157,33 @@ Solver làm việc trên **hình chữ nhật lý tưởng** trong Anchor Frame 
 ```
 a0 = (0, 0, 0)      ← GỐC
 a1 = (X, 0, 0)      ← X = chiều dài cạnh a0 → a1
-a3 = (0, Y, 0)      ← Y = chiều dài cạnh a0 → a3
-a2 = (X, Y, 0)      ← góc đối diện
+a2 = (0, Y, 0)      ← Y = chiều dài cạnh a0 → a2
+a3 = (X, Y, 0)      ← góc đối diện
 ```
+
+> **N pattern:** ID anchor tăng dần theo đường đi `a0 → a1 → a2 → a3` (hình chữ
+> N trong hình chữ nhật) — đúng quy ước của Pozyx reference implementation
+> của ArduPilot. Anchor có **ID thấp nhất** là **gốc**.
 
 - Mặt phẳng anchor: `z = 0`, cao `h_plane` so với sàn.
 - Tag bay **dưới** mặt phẳng anchor ⇒ `z > 0` (chiều sâu).
 
 ### 3.2 Quy tắc chọn GỐC (quan trọng — quyết định trục X/Y)
 
-Đứng tại **a0**, nhìn về **a3**:
-- **Anchor bên TRÁI** = a1 → cạnh `a0 → a1` là hướng **+X**
-- **Anchor bên PHẢI** = ... (a1 nằm bên trái ⇒ a3 nằm bên phải ⇒ cạnh `a0 → a3` là +Y)
+Anchor Frame là hệ **NED-like**: `x = Bắc (North)`, `y = Đông (East)`, `z` hướng
+**xuống**. Vẽ như bản đồ — Bắc lên trên, Đông sang phải — thì:
+
+```
+   a1 (X,0) ●───────────────● a3 (X,Y)
+        │                   │
+        │                   │
+   a0 (0,0) ●───────────────● a2 (0,Y)
+```
+
+Tức đứng tại **a0** (góc dưới-trái):
+- **a1** nằm ở hướng **Bắc** ⇒ cạnh `a0 → a1` là hướng **+X (Bắc)**
+- **a2** nằm ở hướng **Đông** ⇒ cạnh `a0 → a2` là hướng **+Y (Đông)**
+- **a3** là góc đối diện.
 
 Hệ quả: hệ X–Y của Anchor Frame là **cùng chiều với** hệ Bắc–Đông khi nhìn từ trên xuống và `α = 0`.
 
@@ -179,7 +195,7 @@ Bước 1 — **Chọn gốc a0**: đặt tại góc nào? Ghi lại tọa độ
 
 Bước 2 — **Đo cạnh X** (a0 → a1): khoảng cách **thẳng** giữa hai vị trí neo, tính cả chiều cao neo nếu lệch nhau. Ghi `X`.
 
-Bước 3 — **Đo cạnh Y** (a0 → a3): tương tự. Ghi `Y`.
+Bước 3 — **Đo cạnh Y** (a0 → a2): tương tự. Ghi `Y`.
 
 Bước 4 — **Đo độ cao mặt phẳng anchor** `h_plane`: khoảng cách từ mặt sàn (hoặc từ mặt phẳng ngang tham chiếu — EKF origin) lên tâm antenna của anchor. **Các 4 anchor phải cùng cao**, sai số ≤ 5 cm, nếu không Z của Tag sẽ lệch.
 
@@ -195,8 +211,8 @@ Bước 7 — **Điền bảng** (mẫu):
 |---|---|---|---|---|---|
 | a0 | 1 | 0.00 | 0.00 | 0.00 | Gốc |
 | a1 | 2 | `X` | 0.00 | 0.00 | |
-| a2 | 3 | `X` | `Y` | 0.00 | |
-| a3 | 4 | 0.00 | `Y` | 0.00 | |
+| a2 | 3 | 0.00 | `Y` | 0.00 | |
+| a3 | 4 | `X` | `Y` | 0.00 | |
 
 Trong đó `X`, `Y` là kích thước **lý tưởng** của hình chữ nhật solver dùng, KHÔNG phải tọa độ thô đo được nếu 4 neo không hoàn hảo vuông góc. Tọa độ thô dùng để **sửa sai lệch** (xem §3.5).
 
@@ -263,7 +279,7 @@ File: `firmware/ESP32-DWM3000-UWB/UWB_RTLS_Tag/src/uwb_config.h`
 #endif
 
 #ifndef CFG_DEFAULT_LAYOUT_SIZE_Y_M
-#define CFG_DEFAULT_LAYOUT_SIZE_Y_M 10.0f     // ← Y (a0→a3), thay bằng giá trị đo
+#define CFG_DEFAULT_LAYOUT_SIZE_Y_M 10.0f     // ← Y (a0→a2), thay bằng giá trị đo
 #endif
 
 #ifndef CFG_DEFAULT_YAW_OFFSET_DEG
@@ -299,7 +315,7 @@ cfg,x1,y1,z1,x2,y2,z2,x3,y3,z3,x4,y4,z4,yaw[,plane_height]
 Ví dụ — rectangle 12 × 8 m, α = 30°, mặt phẳng cao 2.2 m:
 
 ```
-cfg,0,0,0,12,0,0,12,8,0,0,8,0,30,2.2
+cfg,0,0,0,12,0,0,0,8,0,12,8,0,30,2.2
 ```
 
 Gửi được:
@@ -343,7 +359,7 @@ Tham số node `odometry_node` (đặt trong launch hoặc override khi chạy):
 | Tham số | Ý nghĩa | Đối chiếu ESP32 |
 |---|---|---|
 | `layout_size_x_m` | cạnh a0→a1 | `CFG_DEFAULT_LAYOUT_SIZE_X_M` |
-| `layout_size_y_m` | cạnh a0→a3 | `CFG_DEFAULT_LAYOUT_SIZE_Y_M` |
+| `layout_size_y_m` | cạnh a0→a2 | `CFG_DEFAULT_LAYOUT_SIZE_Y_M` |
 | `layout_alpha_deg` | bearing a0→a1 từ Bắc | `CFG_DEFAULT_YAW_OFFSET_DEG` |
 | `anchor_plane_height_m` | cao mặt phẳng anchor | `CFG_DEFAULT_ANCHOR_PLANE_HEIGHT_M` |
 
@@ -412,8 +428,8 @@ Ngay sau đó Tag in ra config hiện tại — **đối chiếu với bảng kh
 Current Anchor Positions (m, anchor frame):
   A1: (0.000, 0.000, 0.000)
   A2: (12.000, 0.000, 0.000)
-  A3: (12.000, 8.000, 0.000)
-  A4: (0.000, 8.000, 0.000)
+  A3: (0.000, 8.000, 0.000)
+  A4: (12.000, 8.000, 0.000)
 Yaw Offset (a0->a1 bearing from North): 30.0 deg
 Anchor Plane Height: 2.20 m
 ==================
@@ -474,16 +490,22 @@ NED,1.230,2.340,0.92,4,0.05
 
 | Trường | Giá trị mong đợi |
 |---|---|
-| `x`, `y` | vị trí trong Anchor Frame (m) |
+| `x`, `y` | vị tri **NED** (Bắc, Đông) — đã xoay theo α, tương đối `a0` |
 | `quality` | 0..1, càng cao càng tốt |
 | `n_anchors` | 4 (đứng ở giữa, không bị che chắn) |
 | `residual_rms` | < 0.1 m khi đứng yên |
 
+> Với `α = 0` thì NED trùng Anchor Frame, nên các phép kiểm tra dưới đây vẫn
+> đúng. Với `α ≠ 0` phải quy đổi ngược qua phép xoay.
+
 ### 6.2 Kiểm tra vị trí
+
+Với `α = 0`, Anchor Frame trùng NED:
 
 Đặt Tag **tại a0** → kết quả phải là `x≈0, y≈0`.
 Đặt Tag **tại a1** → `x≈X, y≈0`.
-Đặt Tag **tại a3** → `x≈0, y≈Y`.
+Đặt Tag **tại a2** → `x≈0, y≈Y`.
+Đặt Tag **tại a3** → `x≈X, y≈Y`.
 
 Sai số cho phép: **< 0.3 m** (đo thẳng, không bị che chắn bởi vật kim loại).
 
@@ -599,7 +621,7 @@ Ngày: __________      Site: ______________________
 Người thực hiện: ____________________
 
 KÍCH THƯỚC ĐO
-X (a0→a1) = ______ m       Y (a0→a3) = ______ m
+X (a0→a1) = ______ m       Y (a0→a2) = ______ m
 α (bearing a0→a1 từ Bắc) = ______ °
 h_plane (cao mặt phẳng anchor) = ______ m
 GPS a0: lat ______  lon ______  alt ______
@@ -616,6 +638,7 @@ A1 ______  A2 ______  A3 ______  A4 ______  TAG ______
 KIỂM TRA TẦNG 1 (Serial Tag)
 Tại a0  → x=____ y=____  OK? ____
 Tại a1  → x=____ y=____  OK? ____
+Tại a2  → x=____ y=____  OK? ____
 Tại a3  → x=____ y=____  OK? ____
 
 KIỂM TRA TẦNG 2 (MAVLink/EKF)

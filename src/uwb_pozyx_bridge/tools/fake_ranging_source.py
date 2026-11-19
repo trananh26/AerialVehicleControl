@@ -45,7 +45,7 @@ def build_anchors(size_x_m: float, size_y_m: float):
 
     Args:
         size_x_m: The length of the ``a0 -> a1`` side, in metres.
-        size_y_m: The length of the ``a0 -> a3`` side, in metres.
+        size_y_m: The length of the ``a0 -> a2`` side, in metres.
 
     Returns:
         A list of ``(anchor_id, (x_m, y_m, z_m))`` pairs, in the anchor
@@ -161,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         "--size-y",
         type=float,
         default=DEFAULT_SIZE_Y_M,
-        help="length of the a0 -> a3 side of the anchor rectangle, metres",
+        help="length of the a0 -> a2 side of the anchor rectangle, metres",
     )
     args = parser.parse_args(argv)
 

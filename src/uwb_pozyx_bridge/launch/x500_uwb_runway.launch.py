@@ -15,11 +15,14 @@ The vehicle spawns at a random point inside the anchor rectangle, so the
 ranging geometry is not the degenerate "directly under an anchor" case on
 every run.  The spawn point is expressed in the Gazebo world frame (ENU);
 the anchor frame of the solver is the same rectangle with ``x = North`` and
-``y = East``.
+``y = East``.  The anchor ids walk the N pattern: ``a0`` is the origin,
+``a1`` the far end of the ``a0 -> a1`` side, ``a2`` the far end of the
+``a0 -> a2`` side and ``a3`` the opposite corner.
 
 The layout is a rectangle, not necessarily a square: ``layout_size_x_m`` is
 the length of the ``a0 -> a1`` side and ``layout_size_y_m`` the length of
-the ``a0 -> a3`` side.  The defaults match the ESP32 tag's
+the ``a0 -> a2`` side.  The anchor ids walk the **N pattern** of the Pozyx
+reference implementation of ArduPilot.  The defaults match the ESP32 tag's
 ``CFG_DEFAULT_LAYOUT_SIZE_X_M`` / ``CFG_DEFAULT_LAYOUT_SIZE_Y_M``.
 
 Run with::
@@ -326,7 +329,7 @@ def generate_launch_description() -> LaunchDescription:
                 "layout_size_y_m",
                 default_value=f"{LAYOUT_SIZE_Y_M}",
                 description=(
-                    "Length of the a0 -> a3 side of the anchor rectangle, in "
+                    "Length of the a0 -> a2 side of the anchor rectangle, in "
                     "metres.  Matches CFG_DEFAULT_LAYOUT_SIZE_Y_M on the ESP32."
                 ),
             ),

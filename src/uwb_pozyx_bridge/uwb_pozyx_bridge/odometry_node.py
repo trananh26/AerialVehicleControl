@@ -124,7 +124,7 @@ class OdometryBridgeNode(Node):
         #
         # The layout is a rectangle: ``layout_size_x_m`` is the length of
         # the ``a0 -> a1`` side and ``layout_size_y_m`` the length of the
-        # ``a0 -> a3`` side.  They are usually different, because the
+        # ``a0 -> a2`` side.  They are usually different, because the
         # anchors are mounted wherever there is room for them.
         self.declare_parameter("layout_size_x_m", default_layout().size_x_m)
         self.declare_parameter("layout_size_y_m", default_layout().size_y_m)
@@ -339,6 +339,16 @@ class OdometryBridgeNode(Node):
 
     def _send_cycle(self) -> None:
         """One output cycle: solve, convert and transmit."""
+        # Keep the navigation link alive even before the first ranging
+        # message arrives.  SITL is started with "--serial1 tcp:5761:wait",
+        # so it blocks until a companion connects; and the Gazebo plugin
+        # that feeds SITL with sensor data runs inside the same simulation
+        # step.  If the companion only connects once it has ranging data,
+        # the two deadlock each other: no ranging -> no connection -> the
+        # simulation never steps -> no ranging.  Connecting eagerly breaks
+        # the cycle.
+        self._ensure_connected()
+
         self._maybe_declare_origin()
 
         with self._lock:
@@ -430,6 +440,16 @@ class OdometryBridgeNode(Node):
                 f"ned=({north_m:.3f}, {east_m:.3f}, {down_m:.3f}) "
                 f"anchors={result.used_anchor_ids}"
             )
+
+    def _ensure_connected(self) -> None:
+        """Open the navigation link if it is not open yet.
+
+        The connection is retried on every cycle, so the node also
+        reconnects when the autopilot restarts and drops the link.
+        """
+        if self._sender.connected:
+            return
+        self._sender.connect(timeout=0.0)
 
     def _maybe_declare_origin(self) -> None:
         """Declare the global origin and the home position to ArduPilot.

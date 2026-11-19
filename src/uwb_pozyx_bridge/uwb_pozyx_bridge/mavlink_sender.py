@@ -166,17 +166,20 @@ class MavlinkSender:
         """Block until the connection is established or the timeout expires.
 
         Args:
-            timeout: Maximum time to wait, in seconds.
+            timeout: Maximum time to wait, in seconds.  A timeout of zero
+                means "try once and give up immediately", so the socket is
+                still opened at least once.
 
         Returns:
             True if the connection was established.
         """
         deadline = time.time() + timeout
-        while time.time() < deadline:
+        while True:
             if self._open():
                 return True
+            if time.time() >= deadline:
+                return False
             time.sleep(0.5)
-        return False
 
     def close(self) -> None:
         """Close the socket."""

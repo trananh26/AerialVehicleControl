@@ -109,24 +109,39 @@ Chiều z cũng khớp: Pozyx dùng z hướng lên, ArduPilot parse thì `-beac
 đảo sang NED (dương là xuống) — `AP_Beacon_Pozyx.cpp:119, 147` — khớp anchor frame
 `z = Down` của chúng ta.
 
-### 1.4 Một điểm lệch duy nhất: thứ tự index 2/3 (chỉ ảnh hưởng chuỗi beacon)
+### 1.4 Đã đồng bộ: thứ tự index 2/3 theo N pattern (2026-11-17)
 
-| index | Pozyx sketch | Layout của chúng ta |
+| index | Pozyx sketch | Layout của chúng ta (**nay đã giống**) |
 |:--|:--|:--|
 | 0 | (0,0) gốc | (0,0) a0 |
 | 1 | (X,0) trục x | (X,0) a1 |
-| 2 | **(0,Y) trục y** | **(X,Y) a2** |
-| 3 | **(X,Y) đối diện** | **(0,Y) a3** |
+| 2 | (0,Y) trục y | (0,Y) a2 |
+| 3 | (X,Y) đối diện | (X,Y) a3 |
 
-Tức index 2 và 3 bị **hoán đổi**.
+Trước đây layout của chúng ta **đi vòng kim** (a2 = (X,Y), a3 = (0,Y)) —
+lệch đúng ở index 2/3 so với Pozyx. Nay đã chuyển sang **N pattern**: ID
+tăng dần theo đường `a0 → a1 → a2 → a3` (hình chữ N trong hình chữ nhật),
+giống hệt Pozyx reference implementation.
 
-- Với **ODOMETRY**: không ảnh hưởng — ArduPilot không nhìn anchor ID.
-- Với **beacon**: có ảnh hưởng. Nếu sau này đổi sang `BCN_TYPE = 1` thì phải đảo
-  2↔3 (hoặc giữ nguyên layout nhưng báo frame `BEACON_CONFIG` theo thứ tự Pozyx).
+**Đây là quy ước NỘI BỘ giữa hai bên, không phải yêu cầu của ArduPilot.**
+Với chuỗi `ODOMETRY`, ArduPilot không nhìn anchor ID, nên việc đổi này
+**không đổi một byte nào** của pipeline MAVLink / EKF. Mục đích là để hai bên
+(thiết bị thật + mô phỏng) nói chung một ngôn ngữ layout với Pozyx, thuận tiện
+khi đối chiếu với tài liệu Pozyx và với code tham chiếu của ArduPilot.
+
+Nếu sau này chuyển sang chuỗi **beacon** (`BCN_TYPE = 1`), layout này **đã
+đúng sẵn** — không cần đảo 2↔3 nữa.
 
 Thêm: thứ tự 2/3 của Pozyx **không khớp** với mô tả "N pattern" trong wiki
 (wiki nói ID tăng dần theo N là BL→BR→TR→TL, còn sketch là BL→BR→TL→TR). Đây là
-điểm lệch đã biết giữa tài liệu và reference implementation của ArduPilot.
+điểm lệch đã biết giữa tài liệu và reference implementation của ArduPilot;
+chúng ta theo **reference implementation** (sketch).
+
+> **Cần đọc cẩn thận phần "N pattern" của wiki.** Wiki ArduPilot vẽ hình bốn
+> anchor với ID tăng dần **theo vòng kim ngược** (`BL→BR→TR→TL`), trong khi
+> reference implementation (`IndoorLoiter.ino`) đặt ID theo **N** thật
+> (`BL→BR→TL→TR` trong hệ toạ độ của sketch). Vì vậy khi nói "N pattern" ở
+> đây, ta luôn lấy **sketch làm chuẩn**, không lấy hình vẽ trong wiki.
 
 ### 1.5 Đối chiếu: nhập nhằng Z với anchor đồng phẳng (mục 5 trong danh sách đồng bộ)
 
@@ -184,3 +199,95 @@ thiệp, phải tự giải ở ESP32** (multi-start + branch tracking trong `tr
 | `src/ardupilot/libraries/AP_NavEKF3/AP_NavEKF3_RngBcnFusion.cpp` | Range beacon fusion + dual-hypothesis Z |
 | `src/ardupilot/Tools/Pozyx/IndoorLoiter/IndoorLoiter.ino` | Sketch Pozyx tham chiếu — nguồn gốc quy tắc layout |
 | https://ardupilot.org/copter/docs/common-pozyx.html | Tài liệu Pozyx (nói về "N pattern", `BCN_ORIENT_YAW`) |
+
+---
+## 2026-11-17 — Chuyển layout anchor sang N pattern (Pozyx)
+
+**Bối cảnh:** user muốn dùng layout **N pattern** theo tài liệu Pozyx của
+ArduPilot, nhưng **giữ nguyên** pipeline MAVLink `ODOMETRY` (331) → EXTNAV
+(đã loại bỏ `AP_Beacon` / `BCN_TYPE=1` từ vòng code review trước).
+
+**Kết luận:** N pattern là **quy ước nội bộ giữa hai bên** (ROS ↔ ESP32), được
+chọn để **thống nhất với Pozyx reference implementation**. Nó **không** bắt
+buộc phải dùng chuỗi beacon.
+
+### 2.1 Hình học
+
+Pozyx reference (`IndoorLoiter.ino:11-21`):
+
+```
+uint16_t anchor_id[4] = { 0x601C, // (0,0)
+                          0x6020, // x-axis
+                          0x6057, // y-axis
+                          0x605E};
+int32_t anchors_x[4] = {0, 10000, 0,     10000};
+int32_t anchors_y[4] = {0, 0,     10000, 10000};
+```
+
+| index | Pozyx | Trước đây (vòng kim) | Nay (N pattern) |
+|:--|:--|:--|:--|
+| 0 | (0,0) | (0,0) | (0,0) |
+| 1 | (X,0) | (X,0) | (X,0) |
+| 2 | (0,Y) | (X,Y) | **(0,Y)** |
+| 3 | (X,Y) | (0,Y) | **(X,Y)** |
+
+⇒ Chỉ **hoán đổi index 2 ↔ 3**.
+
+### 2.2 Vì sao an toàn
+
+- ArduPilot **không** biết anchor tồn tại: `GCS_Common.cpp:3876-3908` chỉ đòi
+  `frame_id == MAV_FRAME_LOCAL_FRD`, `child_frame_id == MAV_FRAME_BODY_FRD` và
+  vị trí NED tương đối EKF origin. `AP_VisualOdom_MAV.cpp` đưa thẳng sang
+  EXTNAV. **Không có ràng buộc hình học nào.**
+- Solver 2 bên đều **layout-agnostic**: chỉ đọc bảng toạ độ theo index.
+  → Không sửa thuật toán, chỉ đổi bảng.
+- MAVLink `ODOMETRY` (`mavlink_odometry.py`, `verify_odometry_packet.cpp`):
+  quaternion `[NaN,NaN,NaN,NaN]`, velocity `NaN`, `MAV_FRAME_LOCAL_FRD` /
+  `MAV_FRAME_BODY_FRD`, sysid 255 / compid 191 — **không đổi**.
+
+### 2.3 File đã sửa
+
+**ROS** (`AerialVehicleControl`)
+
+| File | Thay đổi |
+|:--|:--|
+| `src/uwb_pozyx_bridge/uwb_pozyx_bridge/uwb_layout.py` | `anchor_frame_positions()` → N pattern; thêm `N_PATTERN_INDEX_ORDER`; `layout_from_anchor_offsets_mm()` đọc `Y` từ `a2` |
+| `src/uwb_gz_plugin/worlds/uwb_runway.sdf` | `<anchor>` pos + `<include>` pose của `uwb_anchor2/3` hoán đổi |
+| `src/uwb_pozyx_bridge/test/test_uwb_layout.py` | Assert layout N pattern + test "N walk" |
+| `src/uwb_pozyx_bridge/test/test_uwb_world.py` | Template + expected world positions |
+
+**ESP32** (`esp32-uwb-localization`)
+
+| File | Thay đổi |
+|:--|:--|
+| `UWB_RTLS_Tag/src/uwb_config.h` | Comment layout N pattern |
+| `UWB_RTLS_Tag/src/tag_config.cpp` | `CFG_DEFAULT_ANCHOR_POS[]` → N pattern; ví dụ lệnh `cfg` |
+| `UWB_RTLS_Tag/src/tag_config.h` | Comment header |
+| `UWB_RTLS_Tag/src/main.cpp` | Comment anchor frame |
+| `tools/check_rect_layout.cpp` | `build_layout()` → N pattern |
+
+### 2.4 Kiểm chứng
+
+- ROS: `pytest src/uwb_pozyx_bridge/test/` → 83 passed.
+- ESP32: `tools/run_check_rect_layout.sh` → `h_err = 0.0000 m` trên layout
+  chữ nhật 14 m × 7 m (N pattern).
+- ESP32: `tools/run_verify_odometry.sh` → ALL CHECKS PASSED (MAVLink frame /
+  msgid / covariance / NaN velocity).
+- ESP32: `pio run -e release` → SUCCESS.
+
+### 2.5 Hệ quả về mặt thực địa
+
+Bảng dán nhãn board (`anchor1..anchor4`) giờ map như sau (id ESP32 = id ROS + 1):
+
+| Board | Anchor | Anchor Frame | ROS id |
+|:--|:--|:--|:--|
+| `anchor1` | a0 | (0,0) | 0 |
+| `anchor2` | a1 | (X,0) | 1 |
+| `anchor3` | a2 | (0,Y) | 2 |
+| `anchor4` | a3 | (X,Y) | 3 |
+
+Lệnh serial cho layout 10×10, α = 20°, `h_plane` = 2 m:
+
+```
+cfg,0,0,0,10,0,0,0,10,0,10,10,0,20,2
+```

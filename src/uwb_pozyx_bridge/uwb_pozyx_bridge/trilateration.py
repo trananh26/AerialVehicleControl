@@ -1,8 +1,8 @@
 """Weighted least-squares trilateration of a UWB tag from anchor ranges.
 
-Ported from the ``uwb_trilateration_node.py`` of the ``feat/uwb-odometry``
-branch, but with the ROS dependency removed so that the solver can be unit
-tested and reused by the Pozyx bridge.
+Ported from the earlier ROS-only ``uwb_trilateration_node.py``, but with
+the ROS dependency removed so that the solver can be unit tested and reused
+by the Pozyx bridge.
 
 The Gazebo plugin encodes one ranging per ``geometry_msgs/Pose`` message:
 

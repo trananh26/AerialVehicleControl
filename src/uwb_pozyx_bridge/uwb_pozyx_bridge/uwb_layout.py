@@ -1,18 +1,66 @@
 """The UWB anchor layout — one source of truth for both sides of the link.
 
-The layout is a **rectangle** of four anchors.  In the **anchor frame** (the
-frame the ranging solver works in) it is the ideal rectangle::
+The layout is a **rectangle** of four anchors, arranged in the **N pattern**
+of the Pozyx reference implementation (``IndoorLoiter.ino``).  In the
+**anchor frame** (the frame the ranging solver works in) it is::
 
     a0 = (0, 0)      a1 = (X, 0)
-    a3 = (0, Y)      a2 = (X, Y)
+    a2 = (0, Y)      a3 = (X, Y)
 
-with ``x`` pointing towards ``a1`` and ``y`` towards ``a3``, and ``z``
+with ``x`` pointing towards ``a1`` and ``y`` towards ``a2``, and ``z``
 pointing **down** (the anchor plane is the reference, ``z = 0``).
+
+The anchor frame is a NED-like frame: ``x = North`` and ``y = East``.  Drawn
+as a MAP — North up, East right, the way the rectangle actually looks from
+above — the four anchors sit at::
+
+    a1 (X,0) --- a3 (X,Y)
+       |            |
+       |            |
+    a0 (0,0) --- a2 (0,Y)
+
+    a1 is at the NORTH end of ``a0``, ``a2`` at its EAST end and ``a3`` is
+    the opposite corner.  Walking the ids ``a0 -> a1 -> a2 -> a3`` goes
+    up, diagonally down-right and up again: the letter **N**.
+
+The N pattern
+-------------
+The anchor with the **lowest id** is the **origin** and sits at the corner
+that has both its neighbours at the far ends of the two sides — the
+"lower-left" corner of the rectangle (South-West on a North-up map).  The ids
+then increase as you travel
+an **N** shape within the rectangle::
+
+    a1 (X,0) --- a3 (X,Y)
+       |            |
+       |            |
+    a0 (0,0) --- a2 (0,Y)
+
+Walking ``a0 -> a1 -> a2 -> a3`` traces the letter **N**: up the ``a0->a1``
+side, diagonally down-right to ``a2``, then up the ``a2->a3`` side.
+
+This is the convention of the Pozyx reference implementation of ArduPilot,
+``Tools/Pozyx/IndoorLoiter/IndoorLoiter.ino``::
+
+    uint16_t anchor_id[4] = { 0x601C, // (0,0)
+                              0x6020, // x-axis
+                              0x6057, // y-axis
+                              0x605E};
+    int32_t anchors_x[4] = {0, 10000, 0,     10000};
+    int32_t anchors_y[4] = {0, 0,     10000, 10000};
+
+and of the ArduPilot documentation for the Pozyx beacon backend:
+
+    The anchor with the lowest ID (IDs are printed in hexadecimal on each
+    device) will act as the "origin" and should be placed at the lower-left
+    corner of the rectangle.  Each of the remaining three anchors should be
+    placed in a corner so that the anchor IDs increase as you travel an "N"
+    pattern within the rectangle.
 
 The layout does not have to be a square: in a real hall the anchors are
 mounted wherever there is room for them, so the ``a0 -> a1`` side and the
-``a0 -> a3`` side generally have different lengths.  ``X`` is the length of
-the ``a0 -> a1`` side and ``Y`` the length of the ``a0 -> a3`` side.
+``a0 -> a2`` side generally have different lengths.  ``X`` is the length of
+the ``a0 -> a1`` side and ``Y`` the length of the ``a0 -> a2`` side.
 
 The anchor frame is the NED frame rotated by the layout angle ``alpha``:
 the physical rectangle is usually not aligned with North/East, because the
@@ -20,7 +68,7 @@ anchors are mounted wherever there is room for them.  ``alpha`` is the
 bearing of the direction ``a0 -> a1``, measured from North, clockwise seen
 from above:
 
-* ``alpha = 0``   -> ``a0 -> a1`` points North, ``a0 -> a3`` points East.
+* ``alpha = 0``   -> ``a0 -> a1`` points North, ``a0 -> a2`` points East.
 * ``alpha > 0``   -> the whole cluster is rotated towards the East.
 
 Both sides of the MAVLink link use exactly this definition, which is why
@@ -59,6 +107,7 @@ __all__ = [
     "LAYOUT_SIZE_Y_M",
     "LAYOUT_SIZE_M",
     "ANCHOR_PLANE_HEIGHT_M",
+    "N_PATTERN_INDEX_ORDER",
     "AnchorLayout",
     "default_layout",
     "rotate_ned",
@@ -70,7 +119,7 @@ ANCHOR_COUNT = 4
 #: Length of the ``a0 -> a1`` side of the layout, in metres.
 LAYOUT_SIZE_X_M = 10.0
 
-#: Length of the ``a0 -> a3`` side of the layout, in metres.
+#: Length of the ``a0 -> a2`` side of the layout, in metres.
 LAYOUT_SIZE_Y_M = 10.0
 
 #: Length of a square layout, in metres.  Kept for the layouts that are
@@ -81,6 +130,27 @@ LAYOUT_SIZE_M = LAYOUT_SIZE_X_M
 #: property of the Gazebo world, not of the layout itself, but the ROS
 #: simulation needs it to place the anchors and to spawn the vehicle.
 ANCHOR_PLANE_HEIGHT_M = 2.0
+
+#: The order in which the anchor **ids** walk the N pattern.
+#:
+#: ``N_PATTERN_INDEX_ORDER[k]`` is the index of the anchor that carries the
+#: id of the ``k``-th step of the N.  The N is walked as
+#: ``a0 -> a1 -> a2 -> a3``, so the order is the identity — but spelling it
+#: out makes the intent explicit and keeps the two sides of the link in
+#: step if the pattern is ever extended.
+#:
+#: The equivalent Pozyx formulation is the ``anchors_x`` / ``anchors_y``
+#: tables of ``IndoorLoiter.ino``:
+#:
+#: =========  =====  =====  ===============
+#: id         x      y     N step
+#: =========  =====  =====  ===============
+#: a0 (id 0)  0      0     origin
+#: a1 (id 1)  X      0     up the a0->a1 side (North)
+#: a2 (id 2)  0      Y     up the a0->a2 side (East)
+#: a3 (id 3)  X      Y     across the far side
+#: =========  =====  =====  ===============
+N_PATTERN_INDEX_ORDER = (0, 1, 2, 3)
 
 
 def rotate_ned(x: float, y: float, alpha_rad: float) -> tuple[float, float]:
@@ -114,7 +184,7 @@ class AnchorLayout:
 
     Attributes:
         size_x_m: Length of the ``a0 -> a1`` side, in metres.
-        size_y_m: Length of the ``a0 -> a3`` side, in metres.
+        size_y_m: Length of the ``a0 -> a2`` side, in metres.
         alpha_deg: Layout angle in degrees: the bearing of ``a0 -> a1``
             measured from North, clockwise seen from above.
         plane_height_m: Height of the anchor plane above the ground, in
@@ -147,7 +217,7 @@ class AnchorLayout:
         """The length of the ``a0 -> a1`` side.
 
         Kept for the layouts that are squares, where it is also the length
-        of the ``a0 -> a3`` side.
+        of the ``a0 -> a2`` side.
         """
         return self.size_x_m
 
@@ -159,10 +229,34 @@ class AnchorLayout:
     def anchor_frame_positions(
         self,
     ) -> tuple[tuple[float, float, float], ...]:
-        """The ideal rectangle in the anchor frame.
+        """The ideal rectangle in the anchor frame, in the N pattern.
 
         The order is the anchor id order used by the Gazebo plugin and by
-        the ESP32 tag: ``a0``, ``a1``, ``a2``, ``a3``.
+        the ESP32 tag: ``a0``, ``a1``, ``a2``, ``a3``.  The ids walk the N
+        pattern, so the positions are::
+
+            a0 = (0, 0)      a1 = (X, 0)
+            a2 = (0, Y)      a3 = (X, Y)
+
+        which is the layout of the Pozyx reference implementation of
+        ArduPilot (``IndoorLoiter.ino``): ``a0`` is the origin, ``a1`` is
+        the far end of the ``a0 -> a1`` side, ``a2`` is the far end of the
+        ``a0 -> a2`` side and ``a3`` is the opposite corner.
+
+        Note that this is **not** the perimeter order.  The perimeter order
+        would put ``a2`` at the opposite corner and ``a3`` at the far end of
+        the ``a0 -> a2`` side; the N pattern swaps those two.
+
+        The anchor frame is NED-like (``x = North``, ``y = East``), so on a
+        map with North up the rectangle reads::
+
+            a1 (X,0) --- a3 (X,Y)
+               |            |
+               |            |
+            a0 (0,0) --- a2 (0,Y)
+
+        Walking the ids ``a0 -> a1 -> a2 -> a3`` goes up, diagonally
+        down-right and up again: the letter **N**.
 
         Returns:
             Four ``(x, y, z)`` triples, in metres.  ``z`` is zero because
@@ -170,12 +264,13 @@ class AnchorLayout:
         """
         sx = self.size_x_m
         sy = self.size_y_m
-        return (
-            (0.0, 0.0, 0.0),
-            (sx, 0.0, 0.0),
-            (sx, sy, 0.0),
-            (0.0, sy, 0.0),
+        positions = (
+            (0.0, 0.0, 0.0),  # a0 — the origin
+            (sx, 0.0, 0.0),  # a1 — up the a0->a1 side
+            (0.0, sy, 0.0),  # a2 — up the a0->a2 side
+            (sx, sy, 0.0),  # a3 — the opposite corner
         )
+        return tuple(positions[index] for index in N_PATTERN_INDEX_ORDER)
 
     def anchor_ned_positions(
         self,
@@ -316,7 +411,11 @@ class AnchorLayout:
 
 
 def default_layout() -> AnchorLayout:
-    """The layout used by the simulation: a 10 m square, aligned with NED."""
+    """The layout used by the simulation: a 10 m square, aligned with NED.
+
+    The square is a special case of the N pattern: with ``X == Y`` the
+    rectangle is symmetric, but the anchor ids still walk the N.
+    """
     return AnchorLayout(
         size_x_m=LAYOUT_SIZE_X_M,
         size_y_m=LAYOUT_SIZE_Y_M,
@@ -369,6 +468,11 @@ def layout_from_anchor_offsets_mm(
     This is the inverse of :func:`anchor_offsets_mm` and is used by the
     tools that read the anchor positions from a parameter file.
 
+    The offsets are expected in the **N pattern** order, i.e. the order of
+    the anchor ids: ``a0`` (origin), ``a1`` (far end of the ``a0 -> a1``
+    side), ``a2`` (far end of the ``a0 -> a2`` side), ``a3`` (opposite
+    corner).
+
     Args:
         offsets: A flat sequence of 12 numbers, ``x0, y0, z0, x1, ...``.
 
@@ -385,10 +489,16 @@ def layout_from_anchor_offsets_mm(
         (values[3 * i] / 1000.0, values[3 * i + 1] / 1000.0, values[3 * i + 2] / 1000.0)
         for i in range(4)
     ]
+    # In the N pattern a1 is the far end of the a0->a1 side and a2 is the
+    # far end of the a0->a2 side, so the two side lengths come straight
+    # from a1 and a2.
     size_x_m = positions[1][0]
-    size_y_m = positions[3][1]
+    size_y_m = positions[2][1]
+    # The bearing of a0 -> a1, measured from North: in the anchor frame the
+    # layout is always axis-aligned, so this is zero unless the offsets
+    # were given in a rotated frame.
     alpha_deg = math.degrees(
-        math.atan2(positions[3][1], positions[3][0]) - math.atan2(0.0, 1.0)
+        math.atan2(positions[1][1], positions[1][0]) - math.atan2(0.0, 1.0)
     )
     return AnchorLayout(
         size_x_m=size_x_m, size_y_m=size_y_m, alpha_deg=alpha_deg

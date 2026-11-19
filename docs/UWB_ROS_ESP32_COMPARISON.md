@@ -5,16 +5,16 @@ MAVLink `ODOMETRY` (id 331) gửi từ một nguồn vị trí UWB tới EKF3 c�
 
 | | Bên A — ROS | Bên B — ESP32 |
 | :-- | :-- | :-- |
-| Repo | `AerialVehicleControl` (branch `x500-uwb`) | `esp32-uwb-localization` |
+| Repo | `AerialVehicleControl` (branch `feat/uwb-odometry-n-pattern`) | `esp32-uwb-localization` |
 | Package | `uwb_pozyx_bridge` (`odometry_node.py`) | `firmware/ESP32-DWM3000-UWB/UWB_RTLS_Tag` (`mavlink_output.cpp`) |
 | Encoder | `build_odometry_message()` — `pymavlink` dialect `v20.common` | `MAVLinkOdomOutput::send_odometry()` — header C `okalachev/MAVLink@2.0.35` |
 | Link | TCP → SITL serial port 5761 | UART Serial2 (GPIO 17 TX / 16 RX) → Pixhawk 6C TELEM2 |
 | Rate | 20 Hz (`send_rate`) | ~15–20 Hz (1 vòng DS-TWR / 4 anchor) |
 
-> **Trạng thái: đã đồng bộ (2026-11).** Cả **7 điểm khác biệt** dưới đây đã
+> **Trạng thái: đã đồng bộ (2026-11).** Cả **8 điểm khác biệt** dưới đây đã
 > được sửa ở **cả hai bên**, và đã kiểm chứng lại bằng:
 >
-> - 61 unit test của `uwb_pozyx_bridge` (ROS) — pass
+> - 83 unit test của `uwb_pozyx_bridge` (ROS) — pass
 > - host test cho `trilateration.cpp` (ESP32) — khớp số với solver ROS
 > - `tools/compare_odometry_frames.py` — so khớp **từng trường** ODOMETRY hai bên
 > - E2E SITL: `takeoff_land_mission` ✅, `circle_mission` ✅ (sai số bám trung bình 0.12 m)
@@ -101,10 +101,13 @@ Hai bên cùng dùng **Anchor Frame** — hệ tọa độ mà solver trilaterat
 
 ```
 a0 = (0, 0, 0)        a1 = (X, 0, 0)      X = 10 m (mặc định)
-a3 = (0, Y, 0)        a2 = (X, Y, 0)      Y = 10 m (mặc định)
+a2 = (0, Y, 0)        a3 = (X, Y, 0)      Y = 10 m (mặc định)
 ```
 
-* `x` hướng về `a1`, `y` hướng về `a3`, `z` hướng **xuống** (mặt phẳng anchor là `z = 0`)
+* `x` hướng về `a1`, `y` hướng về `a2`, `z` hướng **xuống** (mặt phẳng anchor là `z = 0`)
+* Anchor Frame là hệ **NED-like** (`x = Bắc`, `y = Đông`). Vẽ như bản đồ — Bắc lên
+  trên, Đông sang phải — thì `a1` ở phía Bắc của `a0`, `a2` ở phía Đông, `a3` là
+  góc đối diện; đi theo ID `a0 → a1 → a2 → a3` là **hình chữ N**.
 * Layout **không bắt buộc là hình vuông**: `X` và `Y` là hai số độc lập.
 * Khoảng cách đo **bất biến** dưới phép xoay quanh trục đứng ⇒ solver luôn dùng
   hình chữ nhật lý tưởng, chỉ **xoay kết quả** trước khi gửi đi.
@@ -127,8 +130,8 @@ mỗi lần launch bởi `uwb_pozyx_bridge/uwb_world.py::render_world`:
 ```
       <anchor name="uwb_anchor0"><pos>0 0 2.0</pos></anchor>
       <anchor name="uwb_anchor1"><pos>0 10 2.0</pos></anchor>
-      <anchor name="uwb_anchor2"><pos>10 10 2.0</pos></anchor>
-      <anchor name="uwb_anchor3"><pos>10 0 2.0</pos></anchor>
+      <anchor name="uwb_anchor2"><pos>10 0 2.0</pos></anchor>
+      <anchor name="uwb_anchor3"><pos>10 10 2.0</pos></anchor>
 ```
 
 Nguồn sự thật duy nhất cho layout là `uwb_pozyx_bridge/uwb_layout.py`:
@@ -137,7 +140,7 @@ Nguồn sự thật duy nhất cho layout là `uwb_pozyx_bridge/uwb_layout.py`:
 @dataclass(frozen=True)
 class AnchorLayout:
     size_x_m: float = LAYOUT_SIZE_X_M        # 10.0  (cạnh a0 → a1)
-    size_y_m: float = LAYOUT_SIZE_Y_M        # 10.0  (cạnh a0 → a3)
+    size_y_m: float = LAYOUT_SIZE_Y_M        # 10.0  (cạnh a0 → a2)
     alpha_deg: float = 0.0
     plane_height_m: float = ANCHOR_PLANE_HEIGHT_M   # 2.0
     origin_north_m: float = 0.0
@@ -164,7 +167,7 @@ Mặc định được dựng từ **hai** hằng số trong `uwb_config.h`:
 
 ```c
 #define CFG_DEFAULT_LAYOUT_SIZE_X_M 10.0f   // cạnh a0 → a1
-#define CFG_DEFAULT_LAYOUT_SIZE_Y_M 10.0f   // cạnh a0 → a3
+#define CFG_DEFAULT_LAYOUT_SIZE_Y_M 10.0f   // cạnh a0 → a2
 #define CFG_DEFAULT_YAW_OFFSET_DEG     0.0f
 #define CFG_DEFAULT_ANCHOR_PLANE_HEIGHT_M 2.0f
 ```
@@ -178,13 +181,13 @@ cfg,x1,y1,z1,x2,y2,z2,x3,y3,z3,x4,y4,z4,yaw[,plane_height]
 Ví dụ cho layout 10×10 m đồng phẳng, xoay 20° so với Bắc, mặt phẳng cao 2 m:
 
 ```
-cfg,0,0,0,10,0,0,10,10,0,0,10,0,20,2
+cfg,0,0,0,10,0,0,0,10,0,10,10,0,20,2
 ```
 
 Ví dụ cho layout **hình chữ nhật** 14 m × 7 m:
 
 ```
-cfg,0,0,0,14,0,0,14,7,0,0,7,0,20,2
+cfg,0,0,0,14,0,0,0,7,0,14,7,0,20,2
 ```
 
 ### Kết quả
@@ -626,9 +629,9 @@ không còn giả định "hình vuông":
 
 | Layout | Anchor trong world ENU | `takeoff_land` | `circle_mission` — sai số bám |
 | :-- | :-- | :-- | :-- |
-| vuông 10×10, α = 0° | `(0,0,2) (0,10,2) (10,10,2) (10,0,2)` | ✅ leo 1.45 m | TB **0.125 m**, p95 0.244 m |
-| **chữ nhật 14×7**, α = 0° | `(0,0,2) (0,14,2) (7,14,2) (7,0,2)` | ✅ leo 1.42 m | TB **0.111 m**, p95 0.256 m |
-| **chữ nhật 12×8**, α = 30° | `(0,0,2) (6,10.39,2) (12.93,6.39,2) (6.93,-4,2)` | ✅ leo 1.44 m | TB **0.103 m**, p95 0.233 m |
+| vuông 10×10, α = 0° | `(0,0,2) (0,10,2) (10,0,2) (10,10,2)` | ✅ leo 1.45 m | TB **0.125 m**, p95 0.244 m |
+| **chữ nhật 14×7**, α = 0° | `(0,0,2) (0,14,2) (7,0,2) (7,14,2)` | ✅ leo 1.42 m | TB **0.111 m**, p95 0.256 m |
+| **chữ nhật 12×8**, α = 30° | `(0,0,2) (6,10.39,2) (6.93,-4,2) (12.93,6.39,2)` | ✅ leo 1.44 m | TB **0.103 m**, p95 0.233 m |
 
 ⇒ Layout chữ nhật **và** layout xoay đều cho sai số tương đương (hoặc tốt hơn)
 layout vuông: hình học đo tốt hơn khi cạnh dài hơn ⇒ góc nhìn tới các anchor

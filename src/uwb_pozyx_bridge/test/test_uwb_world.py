@@ -19,8 +19,8 @@ _TEMPLATE = """<sdf version="1.9">
     <plugin filename="uwb_gz_plugin" name="uwb_gz_plugin::systems::UwbSystem">
       <anchor name="uwb_anchor0"><pos>0 0 2.0</pos></anchor>
       <anchor name="uwb_anchor1"><pos>0 10 2.0</pos></anchor>
-      <anchor name="uwb_anchor2"><pos>10 10 2.0</pos></anchor>
-      <anchor name="uwb_anchor3"><pos>10 0 2.0</pos></anchor>
+      <anchor name="uwb_anchor2"><pos>10 0 2.0</pos></anchor>
+      <anchor name="uwb_anchor3"><pos>10 10 2.0</pos></anchor>
     </plugin>
     <include>
       <uri>model://uwb_anchor</uri>
@@ -35,12 +35,12 @@ _TEMPLATE = """<sdf version="1.9">
     <include>
       <uri>model://uwb_anchor</uri>
       <name>uwb_anchor2</name>
-      <pose>10 10 2.0 0 0 0</pose>
+      <pose>10 0 2.0 0 0 0</pose>
     </include>
     <include>
       <uri>model://uwb_anchor</uri>
       <name>uwb_anchor3</name>
-      <pose>10 0 2.0 0 0 0</pose>
+      <pose>10 10 2.0 0 0 0</pose>
     </include>
   </world>
 </sdf>
@@ -80,8 +80,8 @@ def test_the_default_layout_leaves_the_world_unchanged():
     assert _anchor_positions(rendered) == [
         (0.0, 0.0, 2.0),
         (0.0, 10.0, 2.0),
-        (10.0, 10.0, 2.0),
         (10.0, 0.0, 2.0),
+        (10.0, 10.0, 2.0),
     ]
     assert _include_positions(rendered) == _anchor_positions(rendered)
 
@@ -94,8 +94,8 @@ def test_a_rectangular_layout_is_rendered_in_both_places():
     expected = [
         (0.0, 0.0, 2.0),
         (0.0, 14.0, 2.0),
-        (7.0, 14.0, 2.0),
         (7.0, 0.0, 2.0),
+        (7.0, 14.0, 2.0),
     ]
     assert _anchor_positions(rendered) == expected
     assert _include_positions(rendered) == expected
@@ -109,11 +109,11 @@ def test_the_rotation_is_applied_to_the_world_positions():
     rendered = render_world(_TEMPLATE, layout)
 
     positions = _anchor_positions(rendered)
-    # a0 -> a1 points East, a0 -> a3 points South.
+    # a0 -> a1 points East, a0 -> a2 points South.
     assert positions[1][0] == pytest.approx(10.0, abs=1e-4)
     assert positions[1][1] == pytest.approx(0.0, abs=1e-4)
-    assert positions[3][0] == pytest.approx(0.0, abs=1e-4)
-    assert positions[3][1] == pytest.approx(-10.0, abs=1e-4)
+    assert positions[2][0] == pytest.approx(0.0, abs=1e-4)
+    assert positions[2][1] == pytest.approx(-10.0, abs=1e-4)
 
 
 def test_the_rest_of_the_world_is_preserved():
